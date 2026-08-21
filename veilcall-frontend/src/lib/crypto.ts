@@ -47,7 +47,7 @@ export async function deriveKeyFromPassphrase(
         'raw', enc.encode(passphrase), 'PBKDF2', false, ['deriveKey']
     );
     return crypto.subtle.deriveKey(
-        { name: 'PBKDF2', salt, iterations: 200000, hash: 'SHA-256' },
+        { name: 'PBKDF2', salt: salt as unknown as Uint8Array<ArrayBuffer>, iterations: 200000, hash: 'SHA-256' },
         baseKey,
         { name: 'AES-GCM', length: 256 },
         false,
@@ -67,9 +67,9 @@ export async function encryptFrame(
 ): Promise<Uint8Array> {
     const iv = crypto.getRandomValues(new Uint8Array(12));
     const encrypted = await crypto.subtle.encrypt(
-        { name: 'AES-GCM', iv },
+        { name: 'AES-GCM', iv: iv as unknown as Uint8Array<ArrayBuffer> },
         key,
-        data
+        data as unknown as Uint8Array<ArrayBuffer>
     );
     // Prepend IV to ciphertext
     const result = new Uint8Array(12 + encrypted.byteLength);

@@ -49,7 +49,7 @@ export class SignalingClient {
         this.ws = new WebSocket(url);
 
         this.ws.onopen = () => {
-            this._emit('connected', { type: 'connected' } as SignalMessage);
+            this._emit('connected', { type: 'connected' } as unknown as SignalMessage);
         };
 
         this.ws.onmessage = (e) => {
