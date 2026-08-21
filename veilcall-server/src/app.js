@@ -1,8 +1,14 @@
 'use strict';
 
+const path = require('path');
+const fs = require('fs');
 const express = require('express');
 const corsMiddleware = require('./middleware/cors');
 const roomRoutes = require('./routes/rooms');
+
+// Resolved path to the Vite production build
+const DIST_DIR = path.resolve(__dirname, '../../veilcall-frontend/dist');
+const DIST_EXISTS = fs.existsSync(DIST_DIR);
 
 /**
  * Creates and configures the Express application.
@@ -19,10 +25,19 @@ function createApp() {
     // ── Routes ───────────────────────────────────────────────────────────────
     app.use('/api', roomRoutes);
 
-    // ── 404 catch-all ────────────────────────────────────────────────────────
-    app.use((req, res) => {
-        res.status(404).json({ error: 'Not found' });
-    });
+    // ── Serve built frontend (production) ────────────────────────────────────
+    if (DIST_EXISTS) {
+        app.use(express.static(DIST_DIR));
+        // SPA fallback: any unknown path returns index.html so React Router works
+        app.get('*', (req, res) => {
+            res.sendFile(path.join(DIST_DIR, 'index.html'));
+        });
+    } else {
+        // Dev mode: no dist folder yet — return 404 for unknown paths
+        app.use((req, res) => {
+            res.status(404).json({ error: 'Not found' });
+        });
+    }
 
     // ── Global error handler ─────────────────────────────────────────────────
     // eslint-disable-next-line no-unused-vars
