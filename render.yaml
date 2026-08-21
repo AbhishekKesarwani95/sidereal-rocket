@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: veilcall
+    runtime: node
+    region: oregon
+    plan: free
+    rootDir: .
+    buildCommand: cd veilcall-frontend && npm install && npm run build && cd ../veilcall-server && npm install
+    startCommand: cd veilcall-server && node server.js
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        fromService:
+          type: web
+          name: veilcall
+          property: port
+      - key: FRONTEND_URL
+        fromService:
+          type: web
+          name: veilcall
+          property: host
