@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { type NetworkTier } from './useNetworkTier';
 
 export type BlurMode = 'gaussian' | 'pixelate' | 'mask';
 
@@ -14,6 +15,27 @@ export const DEFAULT_BLUR_OPTIONS: BlurOptions = {
     mode: 'gaussian',
     strength: 18,
     padding: 85,
+};
+
+/** Resolution constraints per network tier */
+const TIER_CAMERA: Record<NetworkTier, { width: number; height: number }> = {
+    low: { width: 640, height: 480 },
+    mid: { width: 1280, height: 720 },
+    high: { width: 1280, height: 720 },
+};
+
+/** captureStream fps per tier */
+const TIER_FPS: Record<NetworkTier, number> = {
+    low: 12,
+    mid: 20,
+    high: 30,
+};
+
+/** Face detection interval per tier (ms) */
+const TIER_DETECTION_MS: Record<NetworkTier, number> = {
+    low: 0,   // skip ML detection on low — use center-region fallback only
+    mid: 100,
+    high: 66,
 };
 
 // Low-fidelity face box for smoothing
@@ -65,7 +87,7 @@ function applyBlurToRegion(
     ctx.restore();
 }
 
-export function useFaceBlur(options: BlurOptions) {
+export function useFaceBlur(options: BlurOptions, networkTier: NetworkTier = 'high') {
     const videoRef = useRef<HTMLVideoElement>(null);
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const streamRef = useRef<MediaStream | null>(null);
@@ -77,6 +99,9 @@ export function useFaceBlur(options: BlurOptions) {
     const optionsRef = useRef(options);
     const renderingRef = useRef(false);  // true while rAF loop is active
     optionsRef.current = options;
+
+    const networkTierRef = useRef<NetworkTier>(networkTier);
+    useEffect(() => { networkTierRef.current = networkTier; }, [networkTier]);
 
     const [ready, setReady] = useState(false);
     const [error, setError] = useState<string | null>(null);
@@ -94,8 +119,12 @@ export function useFaceBlur(options: BlurOptions) {
             return null;
         }
         try {
+            const tier = networkTierRef.current;
+            const res = TIER_CAMERA[tier];
             const constraints: MediaStreamConstraints = {
-                video: deviceId ? { deviceId: { exact: deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } } : { width: { ideal: 1280 }, height: { ideal: 720 } },
+                video: deviceId
+                    ? { deviceId: { exact: deviceId }, width: { ideal: res.width }, height: { ideal: res.height } }
+                    : { width: { ideal: res.width }, height: { ideal: res.height } },
                 audio: false,
             };
             const stream = await navigator.mediaDevices.getUserMedia(constraints);
@@ -143,7 +172,7 @@ export function useFaceBlur(options: BlurOptions) {
 
         const ctx = canvas.getContext('2d')!;
         let lastDetectionTime = 0;
-        const DETECTION_INTERVAL = 66; // ms — ~15fps detection
+        const DETECTION_INTERVAL = TIER_DETECTION_MS[networkTierRef.current];
 
         const renderFrame = (ts: number) => {
             if (!video.videoWidth) { animFrameRef.current = requestAnimationFrame(renderFrame); return; }
@@ -153,7 +182,9 @@ export function useFaceBlur(options: BlurOptions) {
             ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
             const opts = optionsRef.current;
-            if (opts.enabled && detectorRef.current) {
+            // On low tier, skip ML face detection entirely — use center-region fallback
+            const useMlDetection = TIER_DETECTION_MS[networkTierRef.current] > 0;
+            if (opts.enabled && useMlDetection && detectorRef.current) {
                 // Run detection at reduced rate
                 if (ts - lastDetectionTime > DETECTION_INTERVAL && video.readyState >= 2) {
                     lastDetectionTime = ts;
@@ -185,7 +216,7 @@ export function useFaceBlur(options: BlurOptions) {
                 if (detected.length === 0 && smoothedBoxesRef.current.length > 0) {
                     smoothedBoxesRef.current.forEach(b => applyBlurToRegion(ctx, b, opts.mode, opts.strength, opts.padding));
                 }
-            } else if (opts.enabled && !detectorRef.current) {
+            } else if (opts.enabled && (!useMlDetection || !detectorRef.current)) {
                 // Fallback: blur center region if no detector
                 const w = canvas.width, h = canvas.height;
                 const box: FaceBox = { x: w * 0.25, y: h * 0.05, w: w * 0.5, h: h * 0.55 };
@@ -198,9 +229,9 @@ export function useFaceBlur(options: BlurOptions) {
         renderingRef.current = true;
         animFrameRef.current = requestAnimationFrame(renderFrame);
 
-        // captureStream is not available in Safari — guard required
+        const fps = TIER_FPS[networkTierRef.current];
         try {
-            const captured = (canvas as HTMLCanvasElement & { captureStream: (fps: number) => MediaStream }).captureStream(30);
+            const captured = (canvas as HTMLCanvasElement & { captureStream: (fps: number) => MediaStream }).captureStream(fps);
             blurredStream.current = captured;
             setBlurredStreamState(captured);
         } catch {

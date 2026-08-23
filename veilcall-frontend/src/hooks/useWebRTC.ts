@@ -1,5 +1,6 @@
 import { useRef, useState, useCallback, useEffect } from 'react';
 import { SignalingClient } from '../lib/signal';
+import { type NetworkTier, TIER_VIDEO_BITRATE, TIER_AUDIO_BITRATE } from './useNetworkTier';
 
 // ── Derive server URL from current page so it works via Vite proxy ─────────────
 const API_BASE = import.meta.env.VITE_API_BASE ?? '';
@@ -19,11 +20,36 @@ export interface PeerState {
 interface UseWebRTCOptions {
     roomCode: string;
     localStream: MediaStream | null;
+    networkTier?: NetworkTier;
     onError?: (msg: string) => void;
     onChatMessage?: (from: string, text: string, ts: number) => void;
 }
 
-export function useWebRTC({ roomCode, localStream, onError, onChatMessage }: UseWebRTCOptions) {
+/** Apply per-sender bitrate caps based on current network tier */
+async function applyEncodingParams(pc: RTCPeerConnection, tier: NetworkTier) {
+    const senders = pc.getSenders();
+    for (const sender of senders) {
+        if (!sender.track) continue;
+        try {
+            const params = sender.getParameters();
+            if (!params.encodings || params.encodings.length === 0) {
+                params.encodings = [{}];
+            }
+            const maxBitrate =
+                sender.track.kind === 'video'
+                    ? TIER_VIDEO_BITRATE[tier]
+                    : TIER_AUDIO_BITRATE[tier];
+            params.encodings.forEach((enc) => {
+                enc.maxBitrate = maxBitrate;
+            });
+            await sender.setParameters(params);
+        } catch {
+            // setParameters may fail before negotiation completes — silently skip
+        }
+    }
+}
+
+export function useWebRTC({ roomCode, localStream, networkTier = 'high', onError, onChatMessage }: UseWebRTCOptions) {
     const [myPeerId, setMyPeerId] = useState<string>('');
     const [peers, setPeers] = useState<Map<string, PeerState>>(new Map());
     const [connected, setConnected] = useState(false);
@@ -31,12 +57,21 @@ export function useWebRTC({ roomCode, localStream, onError, onChatMessage }: Use
     const signaling = useRef<SignalingClient | null>(null);
     const pcs = useRef<Map<string, RTCPeerConnection>>(new Map());
     const turnCredRef = useRef<{ username: string; credential: string } | null>(null);
+    const networkTierRef = useRef<NetworkTier>(networkTier);
 
     // Always keep a fresh reference to callbacks and stream
     const onChatMessageRef = useRef(onChatMessage);
     const onErrorRef = useRef(onError);
     useEffect(() => { onChatMessageRef.current = onChatMessage; }, [onChatMessage]);
     useEffect(() => { onErrorRef.current = onError; }, [onError]);
+
+    // Re-apply encoding params whenever the network tier changes mid-call
+    useEffect(() => {
+        networkTierRef.current = networkTier;
+        pcs.current.forEach((pc) => {
+            applyEncodingParams(pc, networkTier);
+        });
+    }, [networkTier]);
 
     const localStreamRef = useRef<MediaStream | null>(localStream);
     useEffect(() => {
@@ -117,6 +152,8 @@ export function useWebRTC({ roomCode, localStream, onError, onChatMessage }: Use
 
         pc.onconnectionstatechange = () => {
             if (pc.connectionState === 'connected') {
+                // Apply bitrate caps as soon as the connection is established
+                applyEncodingParams(pc, networkTierRef.current);
                 setPeers((prev) => {
                     const next = new Map(prev);
                     const p = next.get(peerId);

@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import VideoTile from '../components/VideoTile';
 import { useFaceBlur, DEFAULT_BLUR_OPTIONS, type BlurMode, type BlurOptions } from '../hooks/useFaceBlur';
 import { useWebRTC } from '../hooks/useWebRTC';
+import { useNetworkTier, TIER_LABEL } from '../hooks/useNetworkTier';
 import './Room.css';
 
 interface ChatMessage {
@@ -38,7 +39,9 @@ export default function Room() {
 
     const roomCode = code ?? '';
 
-    const { videoRef, canvasRef, blurredStreamState, start, stop, pauseCamera, resumeCamera, cameraEnabled } = useFaceBlur(blurOptions);
+    const networkTier = useNetworkTier();
+
+    const { videoRef, canvasRef, blurredStreamState, start, stop, pauseCamera, resumeCamera, cameraEnabled } = useFaceBlur(blurOptions, networkTier);
 
     // Assemble combined stream whenever video or mic changes
     useEffect(() => {
@@ -60,6 +63,7 @@ export default function Room() {
     const { peers, connected, connect, disconnect, sendChatMessage } = useWebRTC({
         roomCode,
         localStream,
+        networkTier,
         onError: setRoomError,
         onChatMessage: handleChatMessage,
     });
@@ -152,6 +156,7 @@ export default function Room() {
                 <div className="room-status">
                     {connected ? <span className="dot-connected" /> : <span className="dot-connecting" />}
                     {connected ? `${totalPeople} in room` : 'Connecting…'}
+                    <span className="network-tier-badge">{TIER_LABEL[networkTier]}</span>
                 </div>
                 <div className="room-header-actions">
                     <button

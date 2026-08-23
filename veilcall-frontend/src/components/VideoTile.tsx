@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react';
+import './VideoTile.css';
 
 interface VideoTileProps {
     stream: MediaStream | null;
@@ -78,63 +79,6 @@ export default function VideoTile({
                     </span>
                 </div>
             </div>
-
-            <style>{`
-        .video-tile {
-          position: relative;
-          background: #0a1120;
-          border-radius: var(--rad-xl);
-          overflow: hidden;
-          aspect-ratio: 16/9;
-          border: 1px solid var(--clr-border);
-          transition: border-color var(--tr-base), box-shadow var(--tr-base);
-        }
-        .video-tile-clickable { cursor: pointer; }
-        .video-tile-clickable:hover { border-color: var(--clr-primary); box-shadow: var(--shadow-primary); }
-        .video-tile-small { border-radius: var(--rad-lg); border-color: var(--clr-primary); box-shadow: var(--shadow-primary); }
-        .tile-video { width: 100%; height: 100%; object-fit: cover; }
-        .tile-avatar { width: 100%; height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; background: linear-gradient(135deg, #0d1a2d, #1a2540); }
-        .avatar-circle {
-          width: clamp(48px, 10%, 80px);
-          aspect-ratio: 1;
-          border-radius: 50%;
-          background: var(--grad-primary);
-          display: flex; align-items: center; justify-content: center;
-          font-size: clamp(1.2rem, 3vw, 2rem);
-          font-weight: 700;
-          font-family: var(--font-head);
-          color: #fff;
-        }
-        .tile-waiting { font-size: 0.75rem; color: var(--clr-text-3); font-family: var(--font-head); animation: pulse-ring 2s infinite; }
-        .tile-overlays {
-          position: absolute; inset: 0;
-          display: flex; flex-direction: column;
-          justify-content: space-between;
-          padding: var(--sp-3);
-          background: linear-gradient(to top, rgba(0,0,0,0.6) 0%, transparent 40%);
-          pointer-events: none;
-        }
-        .tile-badges { display: flex; gap: var(--sp-1); align-self: flex-end; }
-        .tile-badge {
-          font-size: 0.9rem;
-          background: rgba(0,0,0,0.6);
-          border-radius: var(--rad-full);
-          padding: 3px 6px;
-          backdrop-filter: blur(4px);
-        }
-        .blur-on-badge { background: rgba(16,185,129,0.3); }
-        .blur-off-badge { background: rgba(239,68,68,0.4); animation: pulse-ring 2s infinite; }
-        .tile-label {
-          align-self: flex-start;
-          background: rgba(0,0,0,0.5);
-          padding: 3px 10px;
-          border-radius: var(--rad-full);
-          font-size: 0.75rem;
-          font-weight: 600;
-          font-family: var(--font-head);
-          backdrop-filter: blur(4px);
-        }
-      `}</style>
         </div>
     );
 }

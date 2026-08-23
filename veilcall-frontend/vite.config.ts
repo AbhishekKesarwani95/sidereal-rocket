@@ -20,4 +20,16 @@ export default defineConfig({
       },
     },
   },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          // Split MediaPipe into its own lazy chunk — keeps app bundle lean
+          if (id.includes('@mediapipe')) return 'mediapipe';
+          // Split React + ReactDOM
+          if (id.includes('node_modules/react') || id.includes('node_modules/react-dom')) return 'react';
+        },
+      },
+    },
+  },
 })
