@@ -29,7 +29,7 @@ function createApp() {
     if (DIST_EXISTS) {
         app.use(express.static(DIST_DIR));
         // SPA fallback: any unknown path returns index.html so React Router works
-        app.get('*', (req, res) => {
+        app.get('/{*path}', (req, res) => {
             res.sendFile(path.join(DIST_DIR, 'index.html'));
         });
     } else {
