@@ -19,7 +19,12 @@ function healthCheck(req, res) {
 function createRoom(req, res) {
     const { maxParticipants = 6, expirySecs, isPublic = false, interests = [] } = req.body ?? {};
 
-    const room = roomService.createRoom({ maxParticipants, expirySecs, isPublic, interests });
+    // Sanitize interests: cap array length, strip non-string items, limit string length
+    const safeInterests = Array.isArray(interests)
+        ? interests.slice(0, 10).map(String).map(s => s.slice(0, 32).trim()).filter(Boolean)
+        : [];
+
+    const room = roomService.createRoom({ maxParticipants, expirySecs, isPublic, interests: safeInterests });
 
     res.status(201).json({
         code: room.code,
@@ -35,6 +40,12 @@ function createRoom(req, res) {
  */
 function joinRoom(req, res) {
     const { code } = req.params;
+
+    // Validate room code format before hitting the Map (8 uppercase alphanum chars)
+    if (!/^[A-Z0-9]{8}$/.test(code)) {
+        return res.status(404).json({ error: 'Room not found or expired.' });
+    }
+
     const result = roomService.validateJoin(code);
 
     if (result.error) {

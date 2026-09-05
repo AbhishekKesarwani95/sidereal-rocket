@@ -78,4 +78,12 @@ function isWsRateLimited(ip) {
     return entry.count > config.RATE_WS_MAX_PER_MIN;
 }
 
+// GC: purge expired entries every 2 minutes to prevent unbounded map growth
+setInterval(() => {
+    const now = Date.now();
+    for (const [ip, entry] of _wsRateMap) {
+        if (now > entry.resetAt) _wsRateMap.delete(ip);
+    }
+}, 120_000).unref();
+
 module.exports = { roomCreateLimiter, joinLimiter, isWsRateLimited, getTrustedIp };

@@ -290,6 +290,16 @@ export function useFaceBlur(
         renderingRef.current = true;
         animFrameRef.current = requestAnimationFrame(renderFrame);
 
+        // Performance fix: pause rAF when tab is hidden, resume when visible
+        const onVisibilityChange = () => {
+            if (document.hidden) {
+                cancelAnimationFrame(animFrameRef.current);
+            } else if (renderingRef.current) {
+                animFrameRef.current = requestAnimationFrame(renderFrame);
+            }
+        };
+        document.addEventListener('visibilitychange', onVisibilityChange);
+
         const fps = TIER_FPS[networkTierRef.current];
         try {
             const captured = (canvas as HTMLCanvasElement & { captureStream: (fps: number) => MediaStream }).captureStream(fps);
@@ -299,6 +309,9 @@ export function useFaceBlur(
             console.warn('[useFaceBlur] captureStream not supported on this browser');
         }
         setReady(true);
+
+        // Return cleanup so caller can remove the visibility listener
+        return () => document.removeEventListener('visibilitychange', onVisibilityChange);
     }, []);
 
     const start = useCallback(async (deviceId?: string) => {

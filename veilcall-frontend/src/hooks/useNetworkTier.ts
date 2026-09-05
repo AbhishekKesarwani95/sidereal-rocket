@@ -55,14 +55,14 @@ export function useNetworkTier(): NetworkTier {
 
 /** Bitrate caps (bps) per tier */
 export const TIER_VIDEO_BITRATE: Record<NetworkTier, number> = {
-    low: 80_000,
+    low: 60_000,   // reduced to preserve bandwidth for audio on 3G
     mid: 400_000,
     high: 1_200_000,
 };
 
 export const TIER_AUDIO_BITRATE: Record<NetworkTier, number> = {
-    low: 16_000,
-    mid: 32_000,
+    low: 32_000,   // 16k was below Opus speech floor — raised to maintain audio clarity
+    mid: 40_000,
     high: 64_000,
 };
 

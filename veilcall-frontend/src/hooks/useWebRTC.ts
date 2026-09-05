@@ -23,6 +23,9 @@ interface UseWebRTCOptions {
     networkTier?: NetworkTier;
     onError?: (msg: string) => void;
     onChatMessage?: (from: string, text: string, ts: number) => void;
+    onReaction?: (from: string, emoji: string) => void;
+    onPeerWaiting?: (peerId: string) => void;
+    onWaitingForApproval?: () => void;
 }
 
 /** Apply per-sender bitrate caps based on current network tier */
@@ -49,21 +52,32 @@ async function applyEncodingParams(pc: RTCPeerConnection, tier: NetworkTier) {
     }
 }
 
-export function useWebRTC({ roomCode, localStream, networkTier = 'high', onError, onChatMessage }: UseWebRTCOptions) {
+export function useWebRTC({ roomCode, localStream, networkTier = 'high', onError, onChatMessage, onReaction, onPeerWaiting, onWaitingForApproval }: UseWebRTCOptions) {
     const [myPeerId, setMyPeerId] = useState<string>('');
     const [peers, setPeers] = useState<Map<string, PeerState>>(new Map());
     const [connected, setConnected] = useState(false);
+    const [isScreenSharing, setIsScreenSharing] = useState(false);
+    const [isWaiting, setIsWaiting] = useState(false);
 
     const signaling = useRef<SignalingClient | null>(null);
     const pcs = useRef<Map<string, RTCPeerConnection>>(new Map());
     const turnCredRef = useRef<{ username: string; credential: string } | null>(null);
     const networkTierRef = useRef<NetworkTier>(networkTier);
+    const screenStreamRef = useRef<MediaStream | null>(null);
+    // Bug 1 fix: buffer ICE candidates that arrive before setRemoteDescription
+    const iceCandidateQueue = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
 
     // Always keep a fresh reference to callbacks and stream
     const onChatMessageRef = useRef(onChatMessage);
     const onErrorRef = useRef(onError);
+    const onReactionRef = useRef(onReaction);
+    const onPeerWaitingRef = useRef(onPeerWaiting);
+    const onWaitingForApprovalRef = useRef(onWaitingForApproval);
     useEffect(() => { onChatMessageRef.current = onChatMessage; }, [onChatMessage]);
     useEffect(() => { onErrorRef.current = onError; }, [onError]);
+    useEffect(() => { onReactionRef.current = onReaction; }, [onReaction]);
+    useEffect(() => { onPeerWaitingRef.current = onPeerWaiting; }, [onPeerWaiting]);
+    useEffect(() => { onWaitingForApprovalRef.current = onWaitingForApproval; }, [onWaitingForApproval]);
 
     // Re-apply encoding params whenever the network tier changes mid-call
     useEffect(() => {
@@ -164,7 +178,9 @@ export function useWebRTC({ roomCode, localStream, networkTier = 'high', onError
         };
 
         // ── Renegotiation (triggered when tracks are added late) ──────────────
+        // Bug 5 fix: guard against glare — only send offer when state is stable
         pc.onnegotiationneeded = async () => {
+            if (pc.signalingState !== 'stable') return;
             try {
                 const offer = await pc.createOffer();
                 await pc.setLocalDescription(offer);
@@ -244,6 +260,12 @@ export function useWebRTC({ roomCode, localStream, networkTier = 'high', onError
             await pc.setRemoteDescription(
                 new RTCSessionDescription(msg.payload as RTCSessionDescriptionInit),
             );
+            // Bug 1 fix: flush queued ICE candidates now that remote SDP is set
+            const queued = iceCandidateQueue.current.get(msg.from) ?? [];
+            iceCandidateQueue.current.delete(msg.from);
+            for (const c of queued) {
+                try { await pc.addIceCandidate(new RTCIceCandidate(c)); } catch { }
+            }
             const answer = await pc.createAnswer();
             await pc.setLocalDescription(answer);
             client.sendTo(msg.from, { type: 'answer', payload: answer });
@@ -257,14 +279,28 @@ export function useWebRTC({ roomCode, localStream, networkTier = 'high', onError
                 await pc.setRemoteDescription(
                     new RTCSessionDescription(msg.payload as RTCSessionDescriptionInit),
                 );
+                // Bug 1 fix: flush queued ICE candidates now that remote SDP is set
+                const queued = iceCandidateQueue.current.get(msg.from) ?? [];
+                iceCandidateQueue.current.delete(msg.from);
+                for (const c of queued) {
+                    try { await pc.addIceCandidate(new RTCIceCandidate(c)); } catch { }
+                }
             }
         });
 
         // ICE candidate
+        // Bug 1 fix: queue candidates if remote description is not yet set
         client.on('ice-candidate', async (msg) => {
             if (!msg.from || !msg.payload) return;
             const pc = pcs.current.get(msg.from);
-            try { await pc?.addIceCandidate(new RTCIceCandidate(msg.payload as RTCIceCandidateInit)); } catch { }
+            if (!pc || !pc.remoteDescription) {
+                // No peer connection yet or SDP not set — queue the candidate
+                const q = iceCandidateQueue.current.get(msg.from) ?? [];
+                q.push(msg.payload as RTCIceCandidateInit);
+                iceCandidateQueue.current.set(msg.from, q);
+                return;
+            }
+            try { await pc.addIceCandidate(new RTCIceCandidate(msg.payload as RTCIceCandidateInit)); } catch { }
         });
 
         // chat
@@ -275,12 +311,39 @@ export function useWebRTC({ roomCode, localStream, networkTier = 'high', onError
             }
         });
 
+        // peer-meta (reactions + mute/video state)
+        client.on('peer-meta', (msg) => {
+            if (!msg.from || !msg.payload) return;
+            const p = msg.payload as Record<string, unknown>;
+            if (p.action === 'reaction') {
+                onReactionRef.current?.(msg.from, String(p.emoji ?? ''));
+            }
+        });
+
+        // waiting room — waiting for host to admit us
+        client.on('waiting-for-approval', () => {
+            setIsWaiting(true);
+            onWaitingForApprovalRef.current?.();
+        });
+
+        // waiting room — a new peer is waiting (host sees this)
+        client.on('peer-waiting', (msg) => {
+            const id = msg.from ?? (msg as any).peerId;
+            if (id) onPeerWaitingRef.current?.(id);
+        });
+
+        // waiting room — we were approved
+        client.on('peer-approved', () => {
+            setIsWaiting(false);
+        });
+
         // peer-left
         client.on('peer-left', (msg) => {
             const id = msg.from ?? (msg as any).peerId;
             if (!id) return;
             pcs.current.get(id)?.close();
             pcs.current.delete(id);
+            iceCandidateQueue.current.delete(id);
             setPeers((prev) => { const next = new Map(prev); next.delete(id); return next; });
         });
 
@@ -306,7 +369,56 @@ export function useWebRTC({ roomCode, localStream, networkTier = 'high', onError
         signaling.current?.send({ type: 'chat', payload: { text, ts: Date.now() } });
     }, []);
 
+    const sendReaction = useCallback((emoji: string) => {
+        signaling.current?.send({ type: 'peer-meta', payload: { action: 'reaction', emoji } });
+    }, []);
+
+    const approvePeer = useCallback((peerId: string) => {
+        signaling.current?.send({ type: 'peer-meta', payload: { action: 'approve', peerId } });
+    }, []);
+
+    const rejectPeer = useCallback((peerId: string) => {
+        signaling.current?.send({ type: 'peer-meta', payload: { action: 'reject', peerId } });
+    }, []);
+
+    /** Toggle screen share. Replaces the video track on all PCs. Auto-reverts when user stops from browser UI. */
+    const shareScreen = useCallback(async () => {
+        if (isScreenSharing) {
+            screenStreamRef.current?.getTracks().forEach(t => t.stop());
+            screenStreamRef.current = null;
+            setIsScreenSharing(false);
+            const camTrack = localStreamRef.current?.getVideoTracks()[0];
+            if (camTrack) {
+                pcs.current.forEach(pc => {
+                    pc.getSenders().find(s => s.track?.kind === 'video')?.replaceTrack(camTrack).catch(console.error);
+                });
+            }
+            return;
+        }
+        try {
+            const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+            const screenTrack = screenStream.getVideoTracks()[0];
+            if (!screenTrack) return;
+            screenStreamRef.current = screenStream;
+            setIsScreenSharing(true);
+            pcs.current.forEach(pc => {
+                pc.getSenders().find(s => s.track?.kind === 'video')?.replaceTrack(screenTrack).catch(console.error);
+            });
+            // Revert when user clicks "Stop sharing" in the browser's native UI
+            screenTrack.onended = () => {
+                setIsScreenSharing(false);
+                screenStreamRef.current = null;
+                const camTrack = localStreamRef.current?.getVideoTracks()[0];
+                if (camTrack) {
+                    pcs.current.forEach(pc => {
+                        pc.getSenders().find(s => s.track?.kind === 'video')?.replaceTrack(camTrack).catch(console.error);
+                    });
+                }
+            };
+        } catch { /* user cancelled or permission denied */ }
+    }, [isScreenSharing]);
+
     useEffect(() => () => disconnect(), [disconnect]);
 
-    return { myPeerId, peers, connected, connect, disconnect, sendChatMessage };
+    return { myPeerId, peers, connected, connect, disconnect, sendChatMessage, sendReaction, shareScreen, isScreenSharing, approvePeer, rejectPeer, isWaiting };
 }

@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import VideoTile from '../components/VideoTile';
+import EmojiReactions, { type ReactionEvent } from '../components/EmojiReactions';
 import { useFaceBlur, DEFAULT_BLUR_OPTIONS, type BlurMode, type BlurOptions } from '../hooks/useFaceBlur';
 import { useWebRTC } from '../hooks/useWebRTC';
 import { useNetworkTier, TIER_LABEL } from '../hooks/useNetworkTier';
@@ -39,6 +40,15 @@ export default function Room() {
     const chatInputRef = useRef<HTMLInputElement>(null);
     const [replyingTo, setReplyingTo] = useState<{ from: string; text: string } | null>(null);
 
+    // ── Feature state ──────────────────────────────────────────────────────────
+    const [reactions, setReactions] = useState<ReactionEvent[]>([]);
+    const [pttMode, setPttMode] = useState(false);          // Push-to-Talk mode toggle
+    const pttActiveRef = useRef(false);                     // Space bar currently held
+    const [callEnded, setCallEnded] = useState(false);      // All peers left
+    const hadPeersRef = useRef(false);                      // Track if we ever had peers
+    const [waitingPeers, setWaitingPeers] = useState<string[]>([]); // Host: pending joiners
+    const [isWaitingOverlay, setIsWaitingOverlay] = useState(false); // Joiner: waiting room
+
     const roomCode = code ?? '';
 
     const networkTier = useNetworkTier();
@@ -75,24 +85,67 @@ export default function Room() {
         ]);
     }, []);
 
-    const { peers, connected, connect, disconnect, sendChatMessage } = useWebRTC({
-        roomCode,
-        localStream,
-        networkTier,
-        onError: setRoomError,
-        onChatMessage: handleChatMessage,
-    });
+    const handleReaction = useCallback((from: string, emoji: string) => {
+        const event: ReactionEvent = { id: `${Date.now()}-${from}`, from, emoji, ts: Date.now() };
+        setReactions(prev => [...prev, event]);
+        // Auto-remove after 3.5s
+        setTimeout(() => setReactions(prev => prev.filter(r => r.id !== event.id)), 3500);
+    }, []);
+
+    const { peers, connected, connect, disconnect, sendChatMessage, sendReaction,
+        shareScreen, isScreenSharing, approvePeer, rejectPeer, isWaiting } = useWebRTC({
+            roomCode,
+            localStream,
+            networkTier,
+            onError: setRoomError,
+            onChatMessage: handleChatMessage,
+            onReaction: handleReaction,
+            onPeerWaiting: (peerId) => setWaitingPeers(prev => [...prev, peerId]),
+            onWaitingForApproval: () => setIsWaitingOverlay(true),
+        });
 
     // ── Connect immediately on mount ─────────────────────────────────────────
-    const didConnect = useRef(false);
-    useEffect(() => {
-        if (!roomCode || didConnect.current) return;
-        didConnect.current = true;
-        connect();
-    }, [roomCode]); // eslint-disable-line
+    // (connect() is now deferred below until micStream is ready — see Bug 6 fix)
 
     // ── Start camera (non-blocking) ──────────────────────────────────────────
     useEffect(() => { start(); return () => stop(); }, []); // eslint-disable-line
+
+    // ── Feature 4: detect when all peers have left ────────────────────────────
+    useEffect(() => {
+        if (peers.size > 0) hadPeersRef.current = true;
+        if (hadPeersRef.current && peers.size === 0 && connected) setCallEnded(true);
+    }, [peers.size, connected]); // eslint-disable-line
+
+    // ── Feature 5: sync isWaiting from hook ──────────────────────────────────
+    useEffect(() => { setIsWaitingOverlay(isWaiting); }, [isWaiting]);
+
+    // ── Feature 3: Push-to-Talk spacebar handler ──────────────────────────────
+    useEffect(() => {
+        if (!pttMode) return;
+        const onDown = (e: KeyboardEvent) => {
+            if (e.code !== 'Space' || e.repeat || pttActiveRef.current) return;
+            if (document.activeElement?.tagName === 'INPUT' || document.activeElement?.tagName === 'TEXTAREA') return;
+            pttActiveRef.current = true;
+            // Unmute mic while holding space
+            micStream?.getAudioTracks().forEach(t => { t.enabled = true; });
+        };
+        const onUp = (e: KeyboardEvent) => {
+            if (e.code !== 'Space') return;
+            pttActiveRef.current = false;
+            // Re-mute on release
+            micStream?.getAudioTracks().forEach(t => { t.enabled = false; });
+        };
+        document.addEventListener('keydown', onDown);
+        document.addEventListener('keyup', onUp);
+        // Mute mic when entering PTT mode
+        micStream?.getAudioTracks().forEach(t => { t.enabled = false; });
+        return () => {
+            document.removeEventListener('keydown', onDown);
+            document.removeEventListener('keyup', onUp);
+            // Restore mic when exiting PTT mode
+            micStream?.getAudioTracks().forEach(t => { t.enabled = !micMuted; });
+        };
+    }, [pttMode, micStream, micMuted]); // eslint-disable-line
 
     // ── Start back camera monitor once connected ──────────────────────────────
     useEffect(() => {
@@ -103,15 +156,36 @@ export default function Room() {
     }, [connected]); // eslint-disable-line
 
     // ── Start mic (independent) ──────────────────────────────────────────────
+    const micReadyRef = useRef(false);
     useEffect(() => {
         let ref: MediaStream | null = null;
         // navigator.mediaDevices is undefined on plain HTTP on mobile — guard required
-        if (!navigator.mediaDevices?.getUserMedia) return;
+        if (!navigator.mediaDevices?.getUserMedia) {
+            micReadyRef.current = true; // mic unavailable — don't block connect
+            return;
+        }
         navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true }, video: false })
-            .then(s => { ref = s; setMicStream(s); })
-            .catch(() => { });
+            .then(s => { ref = s; micReadyRef.current = true; setMicStream(s); })
+            .catch(() => { micReadyRef.current = true; }); // permission denied — don't block connect
         return () => { ref?.getTracks().forEach(t => t.stop()); };
     }, []); // eslint-disable-line
+
+    // ── Connect: wait for mic to be ready (or 2s timeout) before connecting ──
+    // Bug 6 fix: ensures audio tracks are in localStream before first offer
+    const didConnect = useRef(false);
+    useEffect(() => {
+        if (!roomCode || didConnect.current) return;
+        const tryConnect = () => {
+            if (didConnect.current) return;
+            didConnect.current = true;
+            connect();
+        };
+        // Kick off immediately if mic already resolved (fast path)
+        if (micReadyRef.current) { tryConnect(); return; }
+        // Otherwise wait for micStream state or timeout
+        const timer = setTimeout(tryConnect, 2000);
+        return () => clearTimeout(timer);
+    }, [roomCode, micStream]); // eslint-disable-line
 
     // ── Cleanup on unmount ───────────────────────────────────────────────────
     useEffect(() => () => disconnect(), []); // eslint-disable-line
@@ -342,13 +416,32 @@ export default function Room() {
 
             {/* ── Controls bar ── */}
             <div className="room-controls">
+                {/* Reaction tray sits inside the controls wrapper */}
+                <EmojiReactions
+                    reactions={reactions}
+                    onReact={(emoji) => {
+                        sendReaction(emoji);
+                        // Also show own reaction locally
+                        handleReaction('me', emoji);
+                    }}
+                />
+
                 <button
-                    className={`ctrl-btn ${micMuted ? 'muted' : ''}`}
+                    className={`ctrl-btn ${micMuted || (pttMode && !pttActiveRef.current) ? 'muted' : ''}`}
                     onClick={toggleMic}
                     title={micMuted ? 'Unmute' : 'Mute'}
                 >
                     {micMuted ? '🔇' : '🎤'}
                     <span>{micMuted ? 'Unmute' : 'Mute'}</span>
+                </button>
+
+                {/* Feature 3: Push-to-Talk toggle */}
+                <button
+                    className={`ctrl-btn ${pttMode ? 'active' : ''}`}
+                    onClick={() => setPttMode(m => !m)}
+                    title={pttMode ? 'PTT On — Hold Space to speak' : 'Enable Push-to-Talk'}
+                >
+                    🎙️<span>{pttMode ? 'PTT: On' : 'PTT'}</span>
                 </button>
 
                 <button
@@ -358,6 +451,15 @@ export default function Room() {
                 >
                     {cameraEnabled ? '📹' : '📷'}
                     <span>{cameraEnabled ? 'Camera' : 'Cam Off'}</span>
+                </button>
+
+                {/* Feature 1: Screen Share */}
+                <button
+                    className={`ctrl-btn ${isScreenSharing ? 'active' : ''}`}
+                    onClick={shareScreen}
+                    title={isScreenSharing ? 'Stop Sharing' : 'Share Screen'}
+                >
+                    🖥️<span>{isScreenSharing ? 'Stop' : 'Share'}</span>
                 </button>
 
                 <button
@@ -416,6 +518,59 @@ export default function Room() {
                             onChange={e => setBlurOptions(o => ({ ...o, strength: Number(e.target.value) }))} />
                     </label>
                     <button className="btn btn-ghost btn-sm" onClick={() => setBlurPanelOpen(false)}>Close</button>
+                </div>
+            )}
+
+            {/* ── Feature 4: Partner Left overlay ── */}
+            {callEnded && (
+                <div className="call-ended-overlay" role="dialog" aria-label="Call ended">
+                    <div className="call-ended-card glass-card">
+                        <div className="call-ended-icon">👋</div>
+                        <h2>Call Ended</h2>
+                        <p>Everyone else has left the room.</p>
+                        <div className="call-ended-actions">
+                            <button className="btn btn-primary" onClick={() => { setCallEnded(false); hadPeersRef.current = false; }}>
+                                Stay in Room
+                            </button>
+                            <button className="btn btn-ghost" onClick={handleLeave}>
+                                Leave
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* ── Feature 5: Waiting Room overlay (shown to joiner) ── */}
+            {isWaitingOverlay && (
+                <div className="waiting-overlay" role="status" aria-label="Waiting for admission">
+                    <div className="waiting-card glass-card">
+                        <div className="waiting-spinner" />
+                        <h2>Waiting for host…</h2>
+                        <p>The host will admit you shortly.</p>
+                        <button className="btn btn-ghost btn-sm" onClick={handleLeave}>Cancel</button>
+                    </div>
+                </div>
+            )}
+
+            {/* ── Feature 5: Waiting Room — host admission toast ── */}
+            {waitingPeers.length > 0 && (
+                <div className="admit-toast" role="dialog" aria-label="Peer requesting admission">
+                    <div className="admit-toast-body">
+                        <span className="admit-toast-icon">🚪</span>
+                        <span>
+                            <strong>{waitingPeers[0].slice(0, 8)}…</strong> wants to join
+                        </span>
+                    </div>
+                    <div className="admit-toast-actions">
+                        <button className="btn btn-primary btn-sm" onClick={() => {
+                            approvePeer(waitingPeers[0]);
+                            setWaitingPeers(p => p.slice(1));
+                        }}>Admit</button>
+                        <button className="btn btn-ghost btn-sm" onClick={() => {
+                            rejectPeer(waitingPeers[0]);
+                            setWaitingPeers(p => p.slice(1));
+                        }}>Reject</button>
+                    </div>
                 </div>
             )}
 

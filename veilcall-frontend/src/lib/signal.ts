@@ -29,6 +29,7 @@ export class SignalingClient {
     private peerId: string;
     private handlers = new Map<string, ((msg: SignalMessage) => void)[]>();
     private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    private pingTimer: ReturnType<typeof setInterval> | null = null;
     private shouldReconnect = true;
     private serverUrl: string;
 
@@ -50,6 +51,13 @@ export class SignalingClient {
 
         this.ws.onopen = () => {
             this._emit('connected', { type: 'connected' } as unknown as SignalMessage);
+            // Bug 4 fix: keepalive ping every 20 s to prevent NAT/carrier teardown
+            if (this.pingTimer) clearInterval(this.pingTimer);
+            this.pingTimer = setInterval(() => {
+                if (this.ws?.readyState === WebSocket.OPEN) {
+                    this.ws.send(JSON.stringify({ type: 'ping' }));
+                }
+            }, 20_000);
         };
 
         this.ws.onmessage = (e) => {
@@ -61,6 +69,7 @@ export class SignalingClient {
         };
 
         this.ws.onclose = () => {
+            if (this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = null; }
             this._emit('disconnected', { type: 'room-closed' } as SignalMessage);
             if (this.shouldReconnect) {
                 this.reconnectTimer = setTimeout(() => this._connect(), 2000);
@@ -99,6 +108,7 @@ export class SignalingClient {
     disconnect() {
         this.shouldReconnect = false;
         if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+        if (this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = null; }
         this.ws?.close();
         this.ws = null;
     }

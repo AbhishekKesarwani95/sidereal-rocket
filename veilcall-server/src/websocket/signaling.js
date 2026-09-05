@@ -15,6 +15,8 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f
 
 /** Message types this server is willing to relay. Anything else is silently dropped. */
 const ALLOWED_TYPES = new Set(['offer', 'answer', 'ice-candidate', 'key-material', 'chat', 'peer-meta']);
+/** Message types handled locally (not relayed). */
+const LOCAL_TYPES = new Set(['ping']);
 
 /**
  * Fields allowed in relayed envelopes per message type.
@@ -169,6 +171,9 @@ function handleConnection(ws, req) {
         let msg;
         try { msg = JSON.parse(data); } catch { return; }
 
+        // Bug 4 fix: handle client keepalive pings locally — don't relay them
+        if (LOCAL_TYPES.has(msg.type)) return;
+
         // ── Sanitize + whitelist fields ────────────────────────────────────────
         const envelope = sanitizeMessage(msg, peerId);
         if (!envelope) return;
@@ -211,6 +216,24 @@ function handleConnection(ws, req) {
 function attachSignaling(httpServer) {
     const wss = new WebSocketServer({ server: httpServer, path: '/ws' });
     wss.on('connection', handleConnection);
+
+    // Bug 4 fix: server-side heartbeat — detect and terminate zombie connections
+    // Uses the standard ws library isAlive pattern.
+    const heartbeatInterval = setInterval(() => {
+        wss.clients.forEach((ws) => {
+            if (ws.isAlive === false) { ws.terminate(); return; }
+            ws.isAlive = false;
+            ws.ping();
+        });
+    }, 30_000);
+
+    wss.on('connection', (ws) => {
+        ws.isAlive = true;
+        ws.on('pong', () => { ws.isAlive = true; });
+    });
+
+    wss.on('close', () => clearInterval(heartbeatInterval));
+
     return wss;
 }
 

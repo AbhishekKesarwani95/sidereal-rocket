@@ -25,11 +25,24 @@ export default function VideoTile({
         if (!v) return;
         if (stream) {
             v.srcObject = stream;
-            v.play().catch(() => { });
+            // Bug 2 fix: attempt unmuted playback first.
+            // If browser autoplay policy blocks audio, fall back to muted play
+            // and add a one-time interaction handler to unmute.
+            v.muted = isLocal || isMuted;
+            v.play().catch(() => {
+                // Autoplay was blocked — mute and retry
+                v.muted = true;
+                v.play().catch(() => { });
+                if (!isLocal && !isMuted) {
+                    // Unmute on first user interaction with this tile
+                    const unlock = () => { v.muted = false; v.removeEventListener('click', unlock); };
+                    v.addEventListener('click', unlock, { once: true });
+                }
+            });
         } else {
             v.srcObject = null;
         }
-    }, [stream]);
+    }, [stream, isLocal, isMuted]);
 
     const showVideo = !!stream && !isVideoOff;
 
