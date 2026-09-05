@@ -10,7 +10,10 @@ const config = {
     PORT: parseInt(process.env.PORT || '3001', 10),
 
     /** Allowed CORS origin for REST + WS connections */
-    FRONTEND_URL: process.env.FRONTEND_URL || 'http://localhost:5173',
+    FRONTEND_URL: process.env.FRONTEND_URL || '',
+
+    /** Optional second allowed CORS origin (e.g. preview deploy URL) */
+    FRONTEND_URL_2: process.env.FRONTEND_URL_2 || '',
 
     /** Shared secret used to mint short-lived TURN credentials (RFC 8489 §9.1) */
     TURN_SECRET: process.env.TURN_SECRET || 'veilcall-dev-secret',
