@@ -4,6 +4,8 @@ import VideoTile from '../components/VideoTile';
 import { useFaceBlur, DEFAULT_BLUR_OPTIONS, type BlurMode, type BlurOptions } from '../hooks/useFaceBlur';
 import { useWebRTC } from '../hooks/useWebRTC';
 import { useNetworkTier, TIER_LABEL } from '../hooks/useNetworkTier';
+import { useScreenRecordingGuard } from '../hooks/useScreenRecordingGuard';
+import { useBackCameraMonitor } from '../hooks/useBackCameraMonitor';
 import './Room.css';
 
 interface ChatMessage {
@@ -41,7 +43,20 @@ export default function Room() {
 
     const networkTier = useNetworkTier();
 
-    const { videoRef, canvasRef, blurredStreamState, start, stop, pauseCamera, resumeCamera, cameraEnabled } = useFaceBlur(blurOptions, networkTier);
+    // ── Screen recording detection ─────────────────────────────────────────
+    const { recordingDetected, source: recordingSource } = useScreenRecordingGuard();
+    const [recordingToastDismissed, setRecordingToastDismissed] = useState(false);
+    // Show toast again every time a new detection event fires
+    useEffect(() => {
+        if (recordingDetected) setRecordingToastDismissed(false);
+    }, [recordingDetected]);
+
+    const { videoRef, canvasRef, blurredStreamState, start, stop, pauseCamera, resumeCamera, cameraEnabled, switchCamera, activeFacingMode } = useFaceBlur(blurOptions, networkTier, recordingDetected);
+
+    // ── Back camera threat monitor ───────────────────────────────────
+    const backCam = useBackCameraMonitor();
+    const [threatToastDismissed, setThreatToastDismissed] = useState(false);
+    useEffect(() => { if (backCam.threatDetected) setThreatToastDismissed(false); }, [backCam.threatDetected]);
 
     // Assemble combined stream whenever video or mic changes
     useEffect(() => {
@@ -78,6 +93,14 @@ export default function Room() {
 
     // ── Start camera (non-blocking) ──────────────────────────────────────────
     useEffect(() => { start(); return () => stop(); }, []); // eslint-disable-line
+
+    // ── Start back camera monitor once connected ──────────────────────────────
+    useEffect(() => {
+        if (connected && backCam.supported !== false) {
+            backCam.start();
+        }
+        return () => backCam.stop();
+    }, [connected]); // eslint-disable-line
 
     // ── Start mic (independent) ──────────────────────────────────────────────
     useEffect(() => {
@@ -157,6 +180,11 @@ export default function Room() {
                     {connected ? <span className="dot-connected" /> : <span className="dot-connecting" />}
                     {connected ? `${totalPeople} in room` : 'Connecting…'}
                     <span className="network-tier-badge">{TIER_LABEL[networkTier]}</span>
+                    {recordingDetected && (
+                        <span className="recording-detected-badge" title={`Recording signal detected (${recordingSource})`}>
+                            🔴 Face Hidden
+                        </span>
+                    )}
                 </div>
                 <div className="room-header-actions">
                     <button
@@ -342,6 +370,15 @@ export default function Room() {
                 </button>
 
                 <button
+                    className={`ctrl-btn ${activeFacingMode === 'environment' ? 'active' : ''}`}
+                    onClick={() => switchCamera()}
+                    title={activeFacingMode === 'user' ? 'Switch to back camera' : 'Switch to front camera'}
+                >
+                    {activeFacingMode === 'user' ? '🔄' : '🔁'}
+                    <span>{activeFacingMode === 'user' ? 'Flip' : 'Front'}</span>
+                </button>
+
+                <button
                     className="ctrl-btn"
                     onClick={() => setChatOpen(o => !o)}
                 >
@@ -379,6 +416,36 @@ export default function Room() {
                             onChange={e => setBlurOptions(o => ({ ...o, strength: Number(e.target.value) }))} />
                     </label>
                     <button className="btn btn-ghost btn-sm" onClick={() => setBlurPanelOpen(false)}>Close</button>
+                </div>
+            )}
+
+            {/* ── External Recording Threat Toast ── */}
+            {backCam.threatDetected && !threatToastDismissed && (
+                <div className="threat-toast" role="alert">
+                    <span className="threat-toast-icon">⚠️</span>
+                    <div className="recording-toast-body">
+                        <strong>External Camera Detected!</strong>
+                        <span>{backCam.threatReason || 'A recording device may be pointed at your screen.'}</span>
+                    </div>
+                    <button
+                        className="recording-toast-close"
+                        aria-label="Dismiss"
+                        onClick={() => setThreatToastDismissed(true)}
+                    >✕</button>
+                </div>
+            )}
+            {recordingDetected && !recordingToastDismissed && (
+                <div className="recording-toast" role="alert">
+                    <span className="recording-toast-icon">🛡️</span>
+                    <div className="recording-toast-body">
+                        <strong>Recording Detected</strong>
+                        <span>Your face is now fully hidden to protect your privacy.</span>
+                    </div>
+                    <button
+                        className="recording-toast-close"
+                        aria-label="Dismiss"
+                        onClick={() => setRecordingToastDismissed(true)}
+                    >✕</button>
                 </div>
             )}
         </div>

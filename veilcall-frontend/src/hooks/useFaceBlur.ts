@@ -17,6 +17,14 @@ export const DEFAULT_BLUR_OPTIONS: BlurOptions = {
     padding: 85,
 };
 
+/**
+ * When a face bbox width is smaller than this fraction of the canvas,
+ * the user is far from the camera — scale up padding so the blur region
+ * still covers the full face (including hair/ears at distance).
+ */
+const FAR_FACE_THRESHOLD = 0.15; // face < 15% of canvas width → "far"
+const FAR_FACE_PADDING_SCALE = 1.8; // multiply padding by this when far
+
 /** Resolution constraints per network tier */
 const TIER_CAMERA: Record<NetworkTier, { width: number; height: number }> = {
     low: { width: 640, height: 480 },
@@ -52,13 +60,18 @@ function applyBlurToRegion(
     box: FaceBox,
     mode: BlurMode,
     strength: number,
-    padding: number
+    padding: number,
+    canvasWidth: number
 ) {
     const { x, y, w, h } = box;
-    const px = Math.max(0, x - padding);
-    const py = Math.max(0, y - padding);
-    const pw = w + padding * 2;
-    const ph = h + padding * 2;
+    // Adaptive padding: boost when face is far (small in frame)
+    const isFarFace = canvasWidth > 0 && (w / canvasWidth) < FAR_FACE_THRESHOLD;
+    const effectivePadding = isFarFace ? padding * FAR_FACE_PADDING_SCALE : padding;
+
+    const px = Math.max(0, x - effectivePadding);
+    const py = Math.max(0, y - effectivePadding);
+    const pw = w + effectivePadding * 2;
+    const ph = h + effectivePadding * 2;
 
     ctx.save();
     ctx.beginPath();
@@ -71,7 +84,6 @@ function applyBlurToRegion(
         ctx.filter = 'none';
     } else if (mode === 'pixelate') {
         const pixel = Math.max(4, strength * 2);
-        // Draw downsampled then upsampled to create pixelation
         const tmp = document.createElement('canvas');
         tmp.width = Math.max(1, Math.floor(pw / pixel));
         tmp.height = Math.max(1, Math.floor(ph / pixel));
@@ -87,7 +99,20 @@ function applyBlurToRegion(
     ctx.restore();
 }
 
-export function useFaceBlur(options: BlurOptions, networkTier: NetworkTier = 'high') {
+/** Blur the entire canvas (used for forceFullBlur / screen-recording-detected mode). */
+function applyFullFrameBlur(ctx: CanvasRenderingContext2D, strength: number) {
+    ctx.save();
+    ctx.filter = `blur(${strength}px)`;
+    ctx.drawImage(ctx.canvas, 0, 0, ctx.canvas.width, ctx.canvas.height);
+    ctx.filter = 'none';
+    ctx.restore();
+}
+
+export function useFaceBlur(
+    options: BlurOptions,
+    networkTier: NetworkTier = 'high',
+    forceFullBlur = false
+) {
     const videoRef = useRef<HTMLVideoElement>(null);
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const streamRef = useRef<MediaStream | null>(null);
@@ -97,11 +122,20 @@ export function useFaceBlur(options: BlurOptions, networkTier: NetworkTier = 'hi
     const detectionIntervalRef = useRef<number>(0);
     const lastDetectedRef = useRef<FaceBox[]>([]);
     const optionsRef = useRef(options);
-    const renderingRef = useRef(false);  // true while rAF loop is active
+    const renderingRef = useRef(false);
+    const forceFullBlurRef = useRef(forceFullBlur);
     optionsRef.current = options;
 
-    const networkTierRef = useRef<NetworkTier>(networkTier);
+    // Track which camera is active ('user' = front, 'environment' = back)
+    const [activeFacingMode, setActiveFacingMode] = useState<'user' | 'environment'>('user');
+    const activeFacingModeRef = useRef<'user' | 'environment'>('user');
+
+    // Sync refs on every render
+    useEffect(() => { optionsRef.current = options; }, [options]);
     useEffect(() => { networkTierRef.current = networkTier; }, [networkTier]);
+    useEffect(() => { forceFullBlurRef.current = forceFullBlur; }, [forceFullBlur]);
+
+    const networkTierRef = useRef<NetworkTier>(networkTier);
 
     const [ready, setReady] = useState(false);
     const [error, setError] = useState<string | null>(null);
@@ -112,7 +146,7 @@ export function useFaceBlur(options: BlurOptions, networkTier: NetworkTier = 'hi
 
     const blurredStream = useRef<MediaStream | null>(null);
 
-    const initCamera = useCallback(async (deviceId?: string) => {
+    const initCamera = useCallback(async (deviceId?: string, facingMode?: 'user' | 'environment') => {
         // navigator.mediaDevices is undefined on plain HTTP in mobile browsers
         if (!navigator.mediaDevices?.getUserMedia) {
             setError('Camera unavailable: please use HTTPS or localhost.');
@@ -121,14 +155,18 @@ export function useFaceBlur(options: BlurOptions, networkTier: NetworkTier = 'hi
         try {
             const tier = networkTierRef.current;
             const res = TIER_CAMERA[tier];
+            const facing = facingMode ?? activeFacingModeRef.current;
             const constraints: MediaStreamConstraints = {
                 video: deviceId
                     ? { deviceId: { exact: deviceId }, width: { ideal: res.width }, height: { ideal: res.height } }
-                    : { width: { ideal: res.width }, height: { ideal: res.height } },
+                    : { facingMode: facing, width: { ideal: res.width }, height: { ideal: res.height } },
                 audio: false,
             };
             const stream = await navigator.mediaDevices.getUserMedia(constraints);
             streamRef.current = stream;
+            // Update facing mode state
+            activeFacingModeRef.current = facing;
+            setActiveFacingMode(facing);
             if (videoRef.current) {
                 videoRef.current.srcObject = stream;
                 await videoRef.current.play();
@@ -150,11 +188,13 @@ export function useFaceBlur(options: BlurOptions, networkTier: NetworkTier = 'hi
             );
             const detector = await FaceDetector.createFromOptions(vision, {
                 baseOptions: {
-                    modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite',
+                    // Full-range model: detects faces from ~10 cm to ~5 m distance
+                    modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_full_range/float16/1/blaze_face_full_range.tflite',
                     delegate: 'GPU',
                 },
                 runningMode: 'VIDEO',
-                minDetectionConfidence: 0.5,
+                // Lower threshold (0.3 vs 0.5) to catch far-away / partially visible faces
+                minDetectionConfidence: 0.3,
             });
             detectorRef.current = detector;
         } catch (e) {
@@ -174,6 +214,8 @@ export function useFaceBlur(options: BlurOptions, networkTier: NetworkTier = 'hi
         let lastDetectionTime = 0;
         const DETECTION_INTERVAL = TIER_DETECTION_MS[networkTierRef.current];
 
+        let flickerFrame = 0; // for anti-camera flicker shield
+
         const renderFrame = (ts: number) => {
             if (!video.videoWidth) { animFrameRef.current = requestAnimationFrame(renderFrame); return; }
             canvas.width = video.videoWidth;
@@ -181,7 +223,26 @@ export function useFaceBlur(options: BlurOptions, networkTier: NetworkTier = 'hi
 
             ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
+            // ── Anti-physical-camera flicker shield ───────────────────────────
+            // Alternates a 7% white overlay on odd frames (~30Hz at 60fps display).
+            // Invisible to the human eye at this opacity, but external cameras
+            // running at a different frame rate (24/60fps) will capture alternating
+            // light/dark frames, creating visible banding in their recording.
+            flickerFrame++;
+            if (flickerFrame % 2 === 1) {
+                ctx.fillStyle = 'rgba(255,255,255,0.07)';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+            }
+
             const opts = optionsRef.current;
+
+            // ── forceFullBlur: triggered by screen recording detection ────────
+            if (forceFullBlurRef.current) {
+                applyFullFrameBlur(ctx, 30);
+                animFrameRef.current = requestAnimationFrame(renderFrame);
+                return;
+            }
+
             // On low tier, skip ML face detection entirely — use center-region fallback
             const useMlDetection = TIER_DETECTION_MS[networkTierRef.current] > 0;
             if (opts.enabled && useMlDetection && detectorRef.current) {
@@ -201,26 +262,26 @@ export function useFaceBlur(options: BlurOptions, networkTier: NetworkTier = 'hi
                     } catch { }
                 }
 
-                // Smooth boxes
+                // Smooth and apply blur per detected face
                 const detected = lastDetectedRef.current;
                 while (smoothedBoxesRef.current.length < detected.length) {
                     smoothedBoxesRef.current.push({ ...detected[smoothedBoxesRef.current.length] });
                 }
                 smoothedBoxesRef.current = smoothedBoxesRef.current.slice(0, detected.length);
                 for (let i = 0; i < detected.length; i++) {
-                    smoothedBoxesRef.current[i] = lerpBox(smoothedBoxesRef.current[i], detected[i], 0.85); // faster tracking
-                    applyBlurToRegion(ctx, smoothedBoxesRef.current[i], opts.mode, opts.strength, opts.padding);
+                    smoothedBoxesRef.current[i] = lerpBox(smoothedBoxesRef.current[i], detected[i], 0.85);
+                    applyBlurToRegion(ctx, smoothedBoxesRef.current[i], opts.mode, opts.strength, opts.padding, canvas.width);
                 }
 
-                // If no face detected but we have stale boxes, keep blurring the last known area
+                // If no face detected, keep blurring last known area
                 if (detected.length === 0 && smoothedBoxesRef.current.length > 0) {
-                    smoothedBoxesRef.current.forEach(b => applyBlurToRegion(ctx, b, opts.mode, opts.strength, opts.padding));
+                    smoothedBoxesRef.current.forEach(b => applyBlurToRegion(ctx, b, opts.mode, opts.strength, opts.padding, canvas.width));
                 }
             } else if (opts.enabled && (!useMlDetection || !detectorRef.current)) {
-                // Fallback: blur center region if no detector
+                // Fallback: blur a generous center region covering near+far faces
                 const w = canvas.width, h = canvas.height;
-                const box: FaceBox = { x: w * 0.25, y: h * 0.05, w: w * 0.5, h: h * 0.55 };
-                applyBlurToRegion(ctx, box, opts.mode, opts.strength, opts.padding);
+                const box: FaceBox = { x: w * 0.2, y: h * 0.02, w: w * 0.6, h: h * 0.65 };
+                applyBlurToRegion(ctx, box, opts.mode, opts.strength, opts.padding, canvas.width);
             }
 
             animFrameRef.current = requestAnimationFrame(renderFrame);
@@ -320,7 +381,40 @@ export function useFaceBlur(options: BlurOptions, networkTier: NetworkTier = 'hi
         startRendering();
     }, [initCamera, startRendering]);
 
+    /**
+     * Switch between front ('user') and back ('environment') camera.
+     * Stops current tracks, re-acquires with the new facing mode, restarts rendering.
+     */
+    const switchCamera = useCallback(async (targetFacing?: 'user' | 'environment') => {
+        // Toggle if not specified
+        const newFacing = targetFacing ?? (activeFacingModeRef.current === 'user' ? 'environment' : 'user');
+        // Stop current render loop and tracks
+        renderingRef.current = false;
+        cancelAnimationFrame(animFrameRef.current);
+        streamRef.current?.getTracks().forEach(t => t.stop());
+        streamRef.current = null;
+        // Re-acquire with new facing mode
+        const stream = await initCamera(undefined, newFacing);
+        if (!stream) return;
+        const video = videoRef.current!;
+        if (video.readyState < 2) {
+            await Promise.race([
+                new Promise<void>(res => {
+                    const h = () => { video.removeEventListener('loadeddata', h); res(); };
+                    video.addEventListener('loadeddata', h);
+                }),
+                new Promise<void>(res => setTimeout(res, 3000)),
+            ]);
+        }
+        startRendering();
+    }, [initCamera, startRendering]);
+
     useEffect(() => () => stop(), [stop]);
 
-    return { videoRef, canvasRef, blurredStream, blurredStreamState, start, stop, pauseCamera, resumeCamera, cameraEnabled, ready, error, facesDetected };
+    return {
+        videoRef, canvasRef, blurredStream, blurredStreamState,
+        start, stop, pauseCamera, resumeCamera, cameraEnabled,
+        switchCamera, activeFacingMode,
+        ready, error, facesDetected,
+    };
 }

@@ -1,51 +1,59 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 
-    <!-- Primary SEO -->
-    <title>Veilcall — Anonymous Face-Blurred Encrypted Video Calls</title>
-    <meta name="description" content="Free anonymous video calls with automatic face blur and end-to-end encryption. No login required. Create a room in seconds. Your face is blurred before it ever leaves your device." />
-    <meta name="keywords" content="anonymous video call, blur face video call, encrypted video chat, private video call, no login video call, face blur video, random video call, anonymous chat" />
-    <link rel="canonical" href="https://veilcall.app/" />
-    <meta name="robots" content="index, follow" />
-    <meta name="author" content="Veilcall" />
-    <meta name="theme-color" content="#6366f1" />
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 
-    <!-- Resource hints: speed up MediaPipe model load -->
-    <link rel="preconnect" href="https://cdn.jsdelivr.net" />
-    <link rel="preconnect" href="https://storage.googleapis.com" />
-    <link rel="dns-prefetch" href="https://cdn.jsdelivr.net" />
-    <link rel="dns-prefetch" href="https://storage.googleapis.com" />
-    <meta name="format-detection" content="telephone=no" />
+  <!-- Primary SEO -->
+  <title>Veilcall — Anonymous Face-Blurred Encrypted Video Calls</title>
+  <meta name="description"
+    content="Free anonymous video calls with automatic face blur and end-to-end encryption. No login required. Create a room in seconds. Your face is blurred before it ever leaves your device." />
+  <meta name="keywords"
+    content="anonymous video call, blur face video call, encrypted video chat, private video call, no login video call, face blur video, random video call, anonymous chat" />
+  <link rel="canonical" href="https://veilcall.app/" />
+  <meta name="robots" content="index, follow" />
+  <meta name="author" content="Veilcall" />
+  <meta name="theme-color" content="#6366f1" />
 
-    <!-- Open Graph / Social -->
-    <meta property="og:type" content="website" />
-    <meta property="og:url" content="https://veilcall.app/" />
-    <meta property="og:title" content="Veilcall — Anonymous Face-Blurred Encrypted Video Calls" />
-    <meta property="og:description" content="Video calls with automatic face blur and E2EE. No login. No tracking. Your face blurred before transmission." />
-    <meta property="og:image" content="https://veilcall.app/og-image.png" />
-    <meta property="og:site_name" content="Veilcall" />
+  <!-- Resource hints: speed up MediaPipe model load -->
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin="anonymous" />
+  <link rel="preconnect" href="https://storage.googleapis.com" crossorigin="anonymous" />
+  <link rel="dns-prefetch" href="https://cdn.jsdelivr.net" />
+  <link rel="dns-prefetch" href="https://storage.googleapis.com" />
+  <meta name="format-detection" content="telephone=no" />
+  <!-- Security meta tags (defence-in-depth alongside server headers) -->
+  <meta http-equiv="X-Content-Type-Options" content="nosniff" />
+  <meta http-equiv="X-Frame-Options" content="DENY" />
+  <meta name="referrer" content="no-referrer" />
 
-    <!-- Twitter Card -->
-    <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="Veilcall — Anonymous Blurred Video Calls" />
-    <meta name="twitter:description" content="Face-blurred, end-to-end encrypted video calls. No account required." />
-    <meta name="twitter:image" content="https://veilcall.app/og-image.png" />
+  <!-- Open Graph / Social -->
+  <meta property="og:type" content="website" />
+  <meta property="og:url" content="https://veilcall.app/" />
+  <meta property="og:title" content="Veilcall — Anonymous Face-Blurred Encrypted Video Calls" />
+  <meta property="og:description"
+    content="Video calls with automatic face blur and E2EE. No login. No tracking. Your face blurred before transmission." />
+  <meta property="og:image" content="https://veilcall.app/og-image.png" />
+  <meta property="og:site_name" content="Veilcall" />
 
-    <!-- PWA -->
-    <link rel="manifest" href="/manifest.json" />
-    <link rel="apple-touch-icon" href="/icons/icon-192.png" />
-    <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-title" content="Veilcall" />
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <!-- Twitter Card -->
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="Veilcall — Anonymous Blurred Video Calls" />
+  <meta name="twitter:description" content="Face-blurred, end-to-end encrypted video calls. No account required." />
+  <meta name="twitter:image" content="https://veilcall.app/og-image.png" />
 
-    <!-- Favicon -->
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <!-- PWA -->
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="apple-touch-icon" href="/icons/icon-192.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="Veilcall" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 
-    <!-- Structured Data -->
-    <script type="application/ld+json">
+  <!-- Favicon -->
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+
+  <!-- Structured Data -->
+  <script type="application/ld+json">
     {
       "@context": "https://schema.org",
       "@type": "WebApplication",
@@ -59,16 +67,18 @@
     }
     </script>
 
-    <!-- PWA install prompt capture -->
-    <script>
-      window.addEventListener('beforeinstallprompt', (e) => {
-        e.preventDefault();
-        window.deferredPWAPrompt = e;
-      });
-    </script>
-  </head>
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
-  </body>
+  <!-- PWA install prompt capture -->
+  <script>
+    window.addEventListener('beforeinstallprompt', (e) => {
+      e.preventDefault();
+      window.deferredPWAPrompt = e;
+    });
+  </script>
+</head>
+
+<body>
+  <div id="root"></div>
+  <script type="module" src="/src/main.tsx"></script>
+</body>
+
 </html>

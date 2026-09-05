@@ -3,6 +3,14 @@
 const crypto = require('crypto');
 const config = require('../config');
 
+// ── Security guard ───────────────────────────────────────────────────────────
+if (config.NODE_ENV === 'production' && config.TURN_SECRET === 'veilcall-dev-secret') {
+    throw new Error(
+        '[SECURITY] TURN_SECRET is still the insecure default value. ' +
+        'Set a strong TURN_SECRET env var before deploying to production.'
+    );
+}
+
 // ── In-memory store ──────────────────────────────────────────────────────────
 /** @type {Map<string, RoomState>} */
 const rooms = new Map();

@@ -13,11 +13,14 @@ const roomCreateLimiter = rateLimit({
     standardHeaders: true,
     legacyHeaders: false,
     message: { error: 'Too many rooms created from this IP. Try again later.' },
+    // Use the rightmost trusted IP (guards against X-Forwarded-For spoofing)
+    keyGenerator: (req) => getTrustedIp(req),
 });
 
 /**
  * HTTP rate limiter for GET /api/rooms/:code/join.
- * 60 attempts per IP per 5 minutes.
+ * 60 attempts per IP per 5 minutes (general).
+ * A stricter per-code guard lives inside the WS handler.
  */
 const joinLimiter = rateLimit({
     windowMs: 5 * 60 * 1000,
@@ -25,7 +28,33 @@ const joinLimiter = rateLimit({
     standardHeaders: true,
     legacyHeaders: false,
     message: { error: 'Too many join attempts. Try again later.' },
+    keyGenerator: (req) => getTrustedIp(req),
 });
+
+// ── IP extraction helper ──────────────────────────────────────────────────────
+/**
+ * Extracts the real client IP from the request.
+ *
+ * X-Forwarded-For is a comma-separated list added by each proxy hop:
+ *   client, proxy1, proxy2, …, load-balancer
+ * A malicious client can prepend arbitrary IPs to this header.
+ * We use req.socket.remoteAddress (the address of the immediately connected
+ * peer) as the authoritative source when running behind a trusted proxy.
+ * In Render's case the connecting peer IS the load-balancer, so remoteAddress
+ * is the LB IP. We then trust the *last* X-Forwarded-For entry added by the LB.
+ *
+ * @param {import('http').IncomingMessage} req
+ * @returns {string}
+ */
+function getTrustedIp(req) {
+    const xff = req.headers['x-forwarded-for'];
+    if (xff) {
+        // Take the last entry — that's the one the trusted proxy added
+        const parts = xff.split(',');
+        return parts[parts.length - 1].trim();
+    }
+    return req.socket?.remoteAddress || 'unknown';
+}
 
 // ── WebSocket connection rate limiter ────────────────────────────────────────
 // Simple in-memory map (intentionally NOT a dependency on express-rate-limit
@@ -49,4 +78,4 @@ function isWsRateLimited(ip) {
     return entry.count > config.RATE_WS_MAX_PER_MIN;
 }
 
-module.exports = { roomCreateLimiter, joinLimiter, isWsRateLimited };
+module.exports = { roomCreateLimiter, joinLimiter, isWsRateLimited, getTrustedIp };

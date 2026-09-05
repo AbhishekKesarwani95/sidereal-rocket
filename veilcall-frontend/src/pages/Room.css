@@ -82,6 +82,106 @@
     margin-left: 4px;
 }
 
+/* Recording detected badge — pulsing red pill in header */
+.recording-detected-badge {
+    font-size: 0.72rem;
+    font-weight: 700;
+    color: #fff;
+    background: linear-gradient(135deg, #ef4444, #b91c1c);
+    border-radius: var(--rad-full);
+    padding: 2px 10px;
+    margin-left: 6px;
+    letter-spacing: 0.02em;
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.6);
+    animation: recording-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes recording-pulse {
+    0% {
+        box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.55);
+    }
+
+    70% {
+        box-shadow: 0 0 0 8px rgba(239, 68, 68, 0);
+    }
+
+    100% {
+        box-shadow: 0 0 0 0 rgba(239, 68, 68, 0);
+    }
+}
+
+/* Recording toast — slides in from bottom */
+.recording-toast {
+    position: fixed;
+    bottom: 24px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    background: rgba(15, 15, 25, 0.95);
+    border: 1px solid rgba(239, 68, 68, 0.5);
+    border-radius: var(--rad-xl, 16px);
+    padding: 14px 20px;
+    max-width: 92vw;
+    width: 420px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(239, 68, 68, 0.15);
+    z-index: 9999;
+    animation: toast-slide-in 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+    backdrop-filter: blur(12px);
+}
+
+@keyframes toast-slide-in {
+    from {
+        opacity: 0;
+        transform: translateX(-50%) translateY(20px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateX(-50%) translateY(0);
+    }
+}
+
+.recording-toast-icon {
+    font-size: 1.6rem;
+    flex-shrink: 0;
+}
+
+.recording-toast-body {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    flex: 1;
+}
+
+.recording-toast-body strong {
+    font-size: 0.9rem;
+    color: #f87171;
+}
+
+.recording-toast-body span {
+    font-size: 0.78rem;
+    color: var(--clr-text-2, rgba(255, 255, 255, 0.6));
+}
+
+.recording-toast-close {
+    background: none;
+    border: none;
+    color: rgba(255, 255, 255, 0.4);
+    cursor: pointer;
+    font-size: 1rem;
+    padding: 4px 6px;
+    border-radius: 6px;
+    transition: color 0.15s, background 0.15s;
+    flex-shrink: 0;
+}
+
+.recording-toast-close:hover {
+    color: rgba(255, 255, 255, 0.9);
+    background: rgba(255, 255, 255, 0.08);
+}
+
 /* ── Body (video area + chat side-by-side) ──────────────── */
 .room-body {
     display: flex;
@@ -645,4 +745,42 @@
 .blur-panel select,
 .blur-panel input[type="range"] {
     width: 100%;
+}
+
+/* ── External threat toast (amber) — positioned above recording toast ──── */
+.threat-toast {
+    position: fixed;
+    bottom: 100px;
+    /* sits above the recording-toast so both can show */
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    background: rgba(15, 15, 25, 0.95);
+    border: 1px solid rgba(251, 191, 36, 0.55);
+    border-radius: var(--rad-xl, 16px);
+    padding: 14px 20px;
+    max-width: 92vw;
+    width: 440px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(251, 191, 36, 0.12);
+    z-index: 9998;
+    animation: toast-slide-in 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+    backdrop-filter: blur(12px);
+}
+
+.threat-toast .recording-toast-body strong {
+    color: #fbbf24;
+}
+
+.threat-toast-icon {
+    font-size: 1.6rem;
+    flex-shrink: 0;
+}
+
+/* Camera flip button — highlighted when on back camera */
+.ctrl-btn.active {
+    background: rgba(99, 102, 241, 0.25);
+    border-color: rgba(99, 102, 241, 0.6);
+    color: #a5b4fc;
 }
