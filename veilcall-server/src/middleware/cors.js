@@ -5,30 +5,55 @@ const config = require('../config');
 
 /**
  * CORS middleware factory.
- * Allows requests ONLY from the configured FRONTEND_URL.
- * Throws hard in production if FRONTEND_URL is unset — never falls back to '*'.
+ *
+ * Allowed origins (in priority order):
+ *   1. FRONTEND_URL env var  — explicit production URL (required in prod)
+ *   2. FRONTEND_URL_2 env var — optional second origin (e.g. preview URL)
+ *   3. localhost:5173 / localhost:4173 / localhost:3000 — dev fallback
+ *
+ * Never falls back to '*' in production.
  */
 
 const isProd = config.NODE_ENV === 'production';
 
-if (isProd && (!config.FRONTEND_URL || config.FRONTEND_URL === '*')) {
+// Build the allowed-origins set
+const allowedOrigins = new Set();
+
+if (config.FRONTEND_URL && config.FRONTEND_URL !== '*') {
+    allowedOrigins.add(config.FRONTEND_URL.replace(/\/$/, '')); // strip trailing slash
+}
+
+if (config.FRONTEND_URL_2 && config.FRONTEND_URL_2 !== '*') {
+    allowedOrigins.add(config.FRONTEND_URL_2.replace(/\/$/, ''));
+}
+
+if (!isProd) {
+    allowedOrigins.add('http://localhost:5173');
+    allowedOrigins.add('http://localhost:4173');
+    allowedOrigins.add('http://localhost:3000');
+}
+
+// Hard fail in production with no explicit allowed origin
+if (isProd && allowedOrigins.size === 0) {
     throw new Error(
         '[SECURITY] FRONTEND_URL env var must be set to an explicit origin in production. ' +
-        'Refusing to start with wildcard CORS.'
+        'Refusing to start with no allowed CORS origin.'
     );
 }
 
-// In development fall back to localhost:5173; in production must be explicit.
-const allowedOrigin = config.FRONTEND_URL || 'http://localhost:5173';
+console.log('[CORS] Allowed origins:', [...allowedOrigins]);
 
 const corsMiddleware = cors({
     origin(origin, callback) {
         // Allow server-to-server / curl calls with no Origin (e.g. health checks)
         if (!origin) return callback(null, true);
-        if (origin === allowedOrigin) return callback(null, true);
+
+        const normalised = origin.replace(/\/$/, '');
+        if (allowedOrigins.has(normalised)) return callback(null, true);
+
         callback(new Error(`CORS: origin '${origin}' is not allowed`));
     },
-    methods: ['GET', 'POST'],
+    methods: ['GET', 'POST', 'OPTIONS'],
     allowedHeaders: ['Content-Type'],
     credentials: false,
 });
