@@ -4,53 +4,43 @@ const cors = require('cors');
 const config = require('../config');
 
 /**
- * CORS middleware factory.
+ * CORS middleware.
  *
- * Allowed origins built from env vars:
- *   FRONTEND_URL  — primary production origin   (required in prod)
- *   FRONTEND_URL_2 — optional second origin      (e.g. preview URL)
+ * Logic:
+ *   - If FRONTEND_URL (and optionally FRONTEND_URL_2) are set → allow only those.
+ *   - If neither is set → fall back to localhost (dev mode).
  *
- * In development (NODE_ENV !== 'production') localhost ports are auto-added.
- * Never falls back to '*'.
+ * NOTE: Render does not set NODE_ENV automatically.
+ * Do NOT rely on NODE_ENV to decide which origins to allow.
  */
 
-const isProd = config.NODE_ENV === 'production';
-
-// Build the allowed-origins set
 const allowedOrigins = new Set();
 
 const addOrigin = (url) => {
-    if (url && url !== '*') allowedOrigins.add(url.replace(/\/$/, ''));
+    if (url && url.trim() && url !== '*') {
+        allowedOrigins.add(url.trim().replace(/\/$/, ''));
+    }
 };
 
 addOrigin(config.FRONTEND_URL);
 addOrigin(config.FRONTEND_URL_2);
 
-if (!isProd) {
+// Only fall back to localhost when NO explicit origin is configured
+if (allowedOrigins.size === 0) {
     allowedOrigins.add('http://localhost:5173');
     allowedOrigins.add('http://localhost:4173');
     allowedOrigins.add('http://localhost:3000');
-}
-
-// Hard fail in production with no explicit allowed origin
-if (isProd && allowedOrigins.size === 0) {
-    throw new Error(
-        '[SECURITY] FRONTEND_URL env var must be set in production. ' +
-        'Refusing to start with no allowed CORS origin.'
-    );
+    console.warn('[CORS] FRONTEND_URL not set — allowing localhost only. Set FRONTEND_URL for production.');
 }
 
 console.log('[CORS] Allowed origins:', [...allowedOrigins]);
 
 const corsMiddleware = cors({
     origin(origin, callback) {
-        // Allow server-to-server / curl / same-origin calls with no Origin header
-        if (!origin) return callback(null, true);
-
-        const normalised = origin.replace(/\/$/, '');
+        if (!origin) return callback(null, true); // same-origin / server-to-server
+        const normalised = origin.trim().replace(/\/$/, '');
         if (allowedOrigins.has(normalised)) return callback(null, true);
-
-        console.warn(`[CORS] Rejected origin: '${origin}'. Allowed: [${[...allowedOrigins].join(', ')}]`);
+        console.warn(`[CORS] Rejected: '${origin}' | Allowed: [${[...allowedOrigins].join(', ')}]`);
         callback(new Error(`CORS: origin '${origin}' is not allowed`));
     },
     methods: ['GET', 'POST', 'OPTIONS'],

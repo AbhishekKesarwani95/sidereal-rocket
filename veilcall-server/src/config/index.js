@@ -10,7 +10,7 @@ const config = {
     PORT: parseInt(process.env.PORT || '3001', 10),
 
     /** Allowed CORS origin for REST + WS connections */
-    FRONTEND_URL: process.env.FRONTEND_URL || '',
+    FRONTEND_URL: process.env.FRONTEND_URL || 'https://veilcall-sp6x.onrender.com',
 
     /** Optional second allowed CORS origin (e.g. preview deploy URL) */
     FRONTEND_URL_2: process.env.FRONTEND_URL_2 || '',
