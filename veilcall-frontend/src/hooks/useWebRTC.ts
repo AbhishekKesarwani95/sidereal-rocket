@@ -369,7 +369,13 @@ export function useWebRTC({ roomCode, localStream, networkTier = 'high', onError
         signaling.current?.send({ type: 'chat', payload: { text, ts: Date.now() } });
     }, []);
 
+    // Client-side reaction rate limit: max 5 per 10 seconds
+    const reactionTimestamps = useRef<number[]>([]);
     const sendReaction = useCallback((emoji: string) => {
+        const now = Date.now();
+        reactionTimestamps.current = reactionTimestamps.current.filter(t => now - t < 10_000);
+        if (reactionTimestamps.current.length >= 5) return; // throttled
+        reactionTimestamps.current.push(now);
         signaling.current?.send({ type: 'peer-meta', payload: { action: 'reaction', emoji } });
     }, []);
 

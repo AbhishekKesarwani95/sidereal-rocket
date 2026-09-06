@@ -1,5 +1,6 @@
 import { BrowserRouter, Routes, Route, useLocation } from 'react-router-dom';
 import Navbar from './components/Navbar';
+import PWAInstallPrompt from './components/PWAInstallPrompt';
 import Home from './pages/Home';
 import CreateRoom from './pages/CreateRoom';
 import CheckBlur from './pages/CheckBlur';
@@ -34,6 +35,8 @@ function AppShell() {
           </div>
         } />
       </Routes>
+      {/* PWA install banner – shown globally, auto-hides after install */}
+      <PWAInstallPrompt />
     </>
   );
 }

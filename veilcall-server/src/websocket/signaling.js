@@ -90,6 +90,24 @@ function sanitizeMessage(raw, fromPeerId) {
         }
     }
 
+    // Validate peer-meta payloads — whitelist actions and constrain emoji size
+    if (type === 'peer-meta') {
+        const p = msg.payload;
+        if (!p || typeof p !== 'object') return null;
+        const action = p.action;
+        if (typeof action !== 'string') return null;
+        const ALLOWED_ACTIONS = new Set(['reaction', 'approve', 'reject', 'mute', 'video']);
+        if (!ALLOWED_ACTIONS.has(action)) return null;
+        // Emoji: max 8 chars (covers multi-codepoint emoji like flags)
+        if (action === 'reaction') {
+            if (typeof p.emoji !== 'string' || p.emoji.length === 0 || p.emoji.length > 8) return null;
+        }
+        // Approve/reject: peerId must be UUID
+        if (action === 'approve' || action === 'reject') {
+            if (typeof p.peerId !== 'string' || !UUID_RE.test(p.peerId)) return null;
+        }
+    }
+
     // Build clean envelope from known-safe fields only
     const allowedFields = TYPE_ALLOWED_FIELDS[type] ?? ['type', 'payload'];
     const envelope = { from: fromPeerId };
