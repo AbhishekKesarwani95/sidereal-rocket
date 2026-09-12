@@ -99,20 +99,27 @@ export default function Room() {
             onWaitingForApproval: () => setIsWaitingOverlay(true),
         });
 
-    // Bug 2 fix: mutate the stable stream in-place instead of creating a new object.
-    // Placed AFTER useWebRTC so that refreshTracks is in scope.
-    // This keeps the same MediaStream reference alive so WebRTC senders replaceTrack reliably.
+    // Keep stableLocalStream in sync with whatever tracks are currently available.
+    // Only update the video tracks when blurredStreamState changes,
+    // and only update the audio tracks when micStream changes.
+    // This prevents audio being removed every time the camera updates (and vice-versa).
     useEffect(() => {
         const s = stableLocalStream.current;
+        // Replace only the video tracks
         s.getVideoTracks().forEach(t => s.removeTrack(t));
         blurredStreamState?.getVideoTracks().forEach(t => s.addTrack(t));
+        setLocalStream(s);
+        refreshTracks();
+    }, [blurredStreamState]); // eslint-disable-line
+
+    useEffect(() => {
+        const s = stableLocalStream.current;
+        // Replace only the audio tracks
         s.getAudioTracks().forEach(t => s.removeTrack(t));
         micStream?.getAudioTracks().forEach(t => s.addTrack(t));
         setLocalStream(s);
-        // Push updated tracks to any already-open PCs (same stream ref won't re-trigger
-        // the localStream effect in useWebRTC naturally)
         refreshTracks();
-    }, [blurredStreamState, micStream]); // eslint-disable-line
+    }, [micStream]); // eslint-disable-line
 
     // ── Connect immediately on mount ─────────────────────────────────────────
     // (connect() is now deferred below until micStream is ready — see Bug 6 fix)
@@ -180,29 +187,38 @@ export default function Room() {
         return () => { ref?.getTracks().forEach(t => t.stop()); };
     }, []); // eslint-disable-line
 
-    // ── Connect: wait for BOTH mic AND blurred camera stream before connecting ──
-    // Bug 3 fix: ensures tracks exist in localStream before the first offer is sent.
-    // Without this, connect() fires before the canvas captureStream is ready →
-    // no senders exist → no offer → one or both sides never get video.
-    const blurStreamReadyRef = useRef(false);
-    useEffect(() => {
-        if (blurredStreamState) blurStreamReadyRef.current = true;
-    }, [blurredStreamState]);
-
+    // ── Connect: fire as soon as BOTH streams are ready, and only once. ────────
+    // We avoid a 4-second fallback timer, which caused connect() to fire before
+    // tracks were assembled, resulting in PCs with no senders (= no offer).
+    // Instead we watch blurredStreamState and micReadyRef to fire immediately
+    // when both are available. A 6 s absolute cap is kept ONLY for camera-denied
+    // scenarios, since micReadyRef is set synchronously on denial too.
     const didConnect = useRef(false);
     useEffect(() => {
         if (!roomCode || didConnect.current) return;
-        const tryConnect = () => {
-            if (didConnect.current) return;
+        // Both streams must be present before we offer
+        const hasVideo = !!blurredStreamState;
+        const hasAudio = micReadyRef.current; // set even on denial
+        if (hasVideo && hasAudio) {
             didConnect.current = true;
             connect();
-        };
-        // Fast path: both streams already ready
-        if (micReadyRef.current && blurStreamReadyRef.current) { tryConnect(); return; }
-        // Otherwise wait — max 4 s so a camera denial doesn't block forever
-        const timer = setTimeout(tryConnect, 4000);
+        }
+    }, [roomCode, blurredStreamState, micStream]); // eslint-disable-line
+
+    // Absolute fallback: if after 6 s we still haven't connected (e.g. camera denied
+    // AND mic denied simultaneously), force a connect attempt so the user isn't stuck.
+    const didConnectFallback = useRef(false);
+    useEffect(() => {
+        if (!roomCode) return;
+        const timer = setTimeout(() => {
+            if (!didConnect.current && !didConnectFallback.current) {
+                didConnectFallback.current = true;
+                didConnect.current = true;
+                connect();
+            }
+        }, 6000);
         return () => clearTimeout(timer);
-    }, [roomCode, micStream, blurredStreamState]); // eslint-disable-line
+    }, [roomCode]); // eslint-disable-line
 
     // ── Cleanup on unmount ───────────────────────────────────────────────────
     useEffect(() => () => disconnect(), []); // eslint-disable-line

@@ -237,6 +237,44 @@ export function useFaceBlur(
             return avgDiff > MOTION_THRESHOLD;
         }
 
+        /**
+         * Compute a motion-weighted centroid from the low-res motion canvas.
+         * Returns a FaceBox centred on the area of most activity, scaled to canvas coords.
+         * Used as a moving fallback when the ML detector hasn't loaded yet.
+         */
+        function getMotionCentroidBox(cw: number, ch: number): FaceBox {
+            if (!prevFrameData) {
+                return { x: cw * 0.2, y: ch * 0.02, w: cw * 0.6, h: ch * 0.65 };
+            }
+            const curr = mCtx.getImageData(0, 0, 16, 9);
+            let totalW = 0, cx = 0, cy = 0;
+            for (let py = 0; py < 9; py++) {
+                for (let px = 0; px < 16; px++) {
+                    const i = (py * 16 + px) * 4;
+                    const w = Math.abs(curr.data[i] - prevFrameData!.data[i])
+                        + Math.abs(curr.data[i + 1] - prevFrameData!.data[i + 1])
+                        + Math.abs(curr.data[i + 2] - prevFrameData!.data[i + 2]);
+                    cx += px * w;
+                    cy += py * w;
+                    totalW += w;
+                }
+            }
+            if (totalW < 1) return { x: cw * 0.2, y: ch * 0.02, w: cw * 0.6, h: ch * 0.65 };
+            const nx = (cx / totalW) / 15;
+            const ny = (cy / totalW) / 8;
+            const bw = cw * 0.55;
+            const bh = ch * 0.65;
+            return {
+                x: Math.max(0, nx * cw - bw / 2),
+                y: Math.max(0, ny * ch - bh / 2),
+                w: bw,
+                h: bh,
+            };
+        }
+
+        let noDetectionFrames = 0; // frames since last successful ML face detection
+        const NO_DETECTION_EXPIRE = 15; // clear stale box after ~0.5 s at 30fps
+
         let flickerFrame = 0; // for anti-camera flicker shield
 
         const renderFrame = (ts: number) => {
@@ -292,25 +330,37 @@ export function useFaceBlur(
 
                 // Smooth and apply blur per detected face
                 const detected = lastDetectedRef.current;
+
+                // Stale-box expiry: count consecutive frames with no detections
+                if (detected.length === 0) {
+                    noDetectionFrames++;
+                } else {
+                    noDetectionFrames = 0;
+                }
+                // After enough frames with no detection, dissolve the blur region
+                if (noDetectionFrames > NO_DETECTION_EXPIRE) {
+                    smoothedBoxesRef.current = [];
+                }
+
                 while (smoothedBoxesRef.current.length < detected.length) {
                     smoothedBoxesRef.current.push({ ...detected[smoothedBoxesRef.current.length] });
                 }
                 smoothedBoxesRef.current = smoothedBoxesRef.current.slice(0, detected.length);
-                // Motion-responsive smoothing: snap faster when moving
-                const lerpT = motionDetected ? 0.6 : 0.25;
+                // Motion-responsive smoothing: snap faster when moving (0.8 vs 0.3)
+                const lerpT = motionDetected ? 0.8 : 0.3;
                 for (let i = 0; i < detected.length; i++) {
                     smoothedBoxesRef.current[i] = lerpBox(smoothedBoxesRef.current[i], detected[i], lerpT);
                     applyBlurToRegion(ctx, smoothedBoxesRef.current[i], opts.mode, opts.strength, opts.padding, canvas.width);
                 }
 
-                // If no face detected, keep blurring last known area
+                // If face was recently detected, keep blurring the smoothed box (until expire)
                 if (detected.length === 0 && smoothedBoxesRef.current.length > 0) {
                     smoothedBoxesRef.current.forEach(b => applyBlurToRegion(ctx, b, opts.mode, opts.strength, opts.padding, canvas.width));
                 }
             } else if (opts.enabled && (!useMlDetection || !detectorRef.current)) {
-                // Fallback: blur a generous center region covering near+far faces
-                const w = canvas.width, h = canvas.height;
-                const box: FaceBox = { x: w * 0.2, y: h * 0.02, w: w * 0.6, h: h * 0.65 };
+                // Fallback: use motion centroid so the blur follows the user's movements
+                // instead of being stuck at a fixed center region.
+                const box = getMotionCentroidBox(canvas.width, canvas.height);
                 applyBlurToRegion(ctx, box, opts.mode, opts.strength, opts.padding, canvas.width);
             }
 

@@ -261,10 +261,17 @@ export function useWebRTC({ roomCode, localStream, networkTier = 'high', onError
         const client = new SignalingClient(getSignalServer(), roomCode, peerId);
         signaling.current = client;
 
-        // room-joined: we just entered the room
+        // room-joined: we just entered the room (also fires on reconnect)
         client.on('room-joined', async (msg) => {
             setConnected(true);
             for (const existingPeer of msg.peers ?? []) {
+                // On reconnect, a stale PC may already exist — tear it down cleanly
+                // so negotiation starts fresh with the correct tracks.
+                if (pcs.current.has(existingPeer)) {
+                    pcs.current.get(existingPeer)!.close();
+                    pcs.current.delete(existingPeer);
+                    iceCandidateQueue.current.delete(existingPeer);
+                }
                 setPeers((prev) => {
                     const next = new Map(prev);
                     if (!next.has(existingPeer))
@@ -300,11 +307,25 @@ export function useWebRTC({ roomCode, localStream, networkTier = 'high', onError
         // offer: remote is initiating
         client.on('offer', async (msg) => {
             if (!msg.from || !msg.payload) return;
+            // If a PC already exists and is stable/have-local-offer, close it first
+            // (can happen on reconnect when both sides race to offer)
+            const existing = pcs.current.get(msg.from);
+            if (existing && existing.signalingState !== 'closed') {
+                // Only tear down if we don't have a local offer pending
+                // (if we do, the glare-resolution in onnegotiationneeded handles it)
+                if (existing.signalingState === 'stable') {
+                    existing.close();
+                    pcs.current.delete(msg.from);
+                    iceCandidateQueue.current.delete(msg.from);
+                }
+            }
             const pc = createPeerConnection(msg.from);
+            // Guard: only set remote desc if we can accept an offer
+            if (pc.signalingState !== 'stable' && pc.signalingState !== 'have-remote-offer') return;
             await pc.setRemoteDescription(
                 new RTCSessionDescription(msg.payload as RTCSessionDescriptionInit),
             );
-            // Bug 1 fix: flush queued ICE candidates now that remote SDP is set
+            // Flush queued ICE candidates now that remote SDP is set
             const queued = iceCandidateQueue.current.get(msg.from) ?? [];
             iceCandidateQueue.current.delete(msg.from);
             for (const c of queued) {
