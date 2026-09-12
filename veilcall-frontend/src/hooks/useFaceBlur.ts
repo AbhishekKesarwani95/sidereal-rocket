@@ -212,7 +212,30 @@ export function useFaceBlur(
 
         const ctx = canvas.getContext('2d')!;
         let lastDetectionTime = 0;
-        const DETECTION_INTERVAL = TIER_DETECTION_MS[networkTierRef.current];
+        // Motion-adaptive: halve the interval when motion detected
+        let motionDetected = false;
+        let prevFrameData: ImageData | null = null;
+        // Tiny off-screen canvas for pixel-diff motion detection (16×9)
+        const motionCanvas = document.createElement('canvas');
+        motionCanvas.width = 16;
+        motionCanvas.height = 9;
+        const mCtx = motionCanvas.getContext('2d', { willReadFrequently: true })!;
+        const MOTION_THRESHOLD = 20; // per-channel avg change that counts as "motion"
+
+        function detectMotion(): boolean {
+            mCtx.drawImage(video!, 0, 0, 16, 9);
+            const curr = mCtx.getImageData(0, 0, 16, 9);
+            if (!prevFrameData) { prevFrameData = curr; return false; }
+            let diff = 0;
+            for (let i = 0; i < curr.data.length; i += 4) {
+                diff += Math.abs(curr.data[i] - prevFrameData.data[i])
+                    + Math.abs(curr.data[i + 1] - prevFrameData.data[i + 1])
+                    + Math.abs(curr.data[i + 2] - prevFrameData.data[i + 2]);
+            }
+            prevFrameData = curr;
+            const avgDiff = diff / (16 * 9 * 3);
+            return avgDiff > MOTION_THRESHOLD;
+        }
 
         let flickerFrame = 0; // for anti-camera flicker shield
 
@@ -224,10 +247,6 @@ export function useFaceBlur(
             ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
             // ── Anti-physical-camera flicker shield ───────────────────────────
-            // Alternates a 7% white overlay on odd frames (~30Hz at 60fps display).
-            // Invisible to the human eye at this opacity, but external cameras
-            // running at a different frame rate (24/60fps) will capture alternating
-            // light/dark frames, creating visible banding in their recording.
             flickerFrame++;
             if (flickerFrame % 2 === 1) {
                 ctx.fillStyle = 'rgba(255,255,255,0.07)';
@@ -243,10 +262,19 @@ export function useFaceBlur(
                 return;
             }
 
+            // ── Motion-adaptive detection interval ────────────────────────────
+            // Check motion every ~10 frames to keep cost low
+            if (flickerFrame % 10 === 0) {
+                motionDetected = detectMotion();
+            }
+            const BASE_INTERVAL = TIER_DETECTION_MS[networkTierRef.current];
+            // When motion detected: use 1/3 of base interval (more frequent)
+            const DETECTION_INTERVAL = motionDetected ? Math.max(33, BASE_INTERVAL / 3) : BASE_INTERVAL;
+
             // On low tier, skip ML face detection entirely — use center-region fallback
             const useMlDetection = TIER_DETECTION_MS[networkTierRef.current] > 0;
             if (opts.enabled && useMlDetection && detectorRef.current) {
-                // Run detection at reduced rate
+                // Run detection at adaptive rate
                 if (ts - lastDetectionTime > DETECTION_INTERVAL && video.readyState >= 2) {
                     lastDetectionTime = ts;
                     try {
@@ -268,8 +296,10 @@ export function useFaceBlur(
                     smoothedBoxesRef.current.push({ ...detected[smoothedBoxesRef.current.length] });
                 }
                 smoothedBoxesRef.current = smoothedBoxesRef.current.slice(0, detected.length);
+                // Motion-responsive smoothing: snap faster when moving
+                const lerpT = motionDetected ? 0.6 : 0.25;
                 for (let i = 0; i < detected.length; i++) {
-                    smoothedBoxesRef.current[i] = lerpBox(smoothedBoxesRef.current[i], detected[i], 0.85);
+                    smoothedBoxesRef.current[i] = lerpBox(smoothedBoxesRef.current[i], detected[i], lerpT);
                     applyBlurToRegion(ctx, smoothedBoxesRef.current[i], opts.mode, opts.strength, opts.padding, canvas.width);
                 }
 

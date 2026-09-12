@@ -434,34 +434,53 @@ export function useWebRTC({ roomCode, localStream, networkTier = 'high', onError
     /** Toggle screen share. Replaces the video track on all PCs. Auto-reverts when user stops from browser UI. */
     const shareScreen = useCallback(async () => {
         if (isScreenSharing) {
+            // Stop screen tracks and revert to camera
             screenStreamRef.current?.getTracks().forEach(t => t.stop());
             screenStreamRef.current = null;
             setIsScreenSharing(false);
             const camTrack = localStreamRef.current?.getVideoTracks()[0];
             if (camTrack) {
                 pcs.current.forEach(pc => {
-                    pc.getSenders().find(s => s.track?.kind === 'video')?.replaceTrack(camTrack).catch(console.error);
+                    const sender = pc.getSenders().find(s => s.track?.kind === 'video');
+                    if (sender) {
+                        sender.replaceTrack(camTrack).catch(console.error);
+                    } else {
+                        // No video sender — add the camera track back
+                        pc.addTrack(camTrack, localStreamRef.current!);
+                    }
                 });
             }
             return;
         }
         try {
-            const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+            const screenStream = await navigator.mediaDevices.getDisplayMedia({
+                video: { frameRate: { ideal: 30 } },
+                audio: false,
+            });
             const screenTrack = screenStream.getVideoTracks()[0];
             if (!screenTrack) return;
             screenStreamRef.current = screenStream;
             setIsScreenSharing(true);
             pcs.current.forEach(pc => {
-                pc.getSenders().find(s => s.track?.kind === 'video')?.replaceTrack(screenTrack).catch(console.error);
+                const sender = pc.getSenders().find(s => s.track?.kind === 'video');
+                if (sender) {
+                    // Replace existing video sender — no renegotiation needed
+                    sender.replaceTrack(screenTrack).catch(console.error);
+                } else {
+                    // No video sender yet — add track which triggers onnegotiationneeded
+                    pc.addTrack(screenTrack, screenStream);
+                }
             });
-            // Revert when user clicks "Stop sharing" in the browser's native UI
+            // Revert when user clicks "Stop sharing" in browser native UI
             screenTrack.onended = () => {
                 setIsScreenSharing(false);
                 screenStreamRef.current = null;
                 const camTrack = localStreamRef.current?.getVideoTracks()[0];
                 if (camTrack) {
                     pcs.current.forEach(pc => {
-                        pc.getSenders().find(s => s.track?.kind === 'video')?.replaceTrack(camTrack).catch(console.error);
+                        const sender = pc.getSenders().find(s => s.track?.kind === 'video');
+                        if (sender) sender.replaceTrack(camTrack).catch(console.error);
+                        else pc.addTrack(camTrack, localStreamRef.current!);
                     });
                 }
             };
