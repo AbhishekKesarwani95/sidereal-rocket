@@ -26,6 +26,7 @@ interface UseWebRTCOptions {
     onReaction?: (from: string, emoji: string) => void;
     onPeerWaiting?: (peerId: string) => void;
     onWaitingForApproval?: () => void;
+    onScreenShareStop?: () => void;
 }
 
 /** Apply per-sender bitrate caps based on current network tier */
@@ -52,7 +53,7 @@ async function applyEncodingParams(pc: RTCPeerConnection, tier: NetworkTier) {
     }
 }
 
-export function useWebRTC({ roomCode, localStream, networkTier = 'high', onError, onChatMessage, onReaction, onPeerWaiting, onWaitingForApproval }: UseWebRTCOptions) {
+export function useWebRTC({ roomCode, localStream, networkTier = 'high', onError, onChatMessage, onReaction, onPeerWaiting, onWaitingForApproval, onScreenShareStop }: UseWebRTCOptions) {
     const [myPeerId, setMyPeerId] = useState<string>('');
     const [peers, setPeers] = useState<Map<string, PeerState>>(new Map());
     const [connected, setConnected] = useState(false);
@@ -66,6 +67,9 @@ export function useWebRTC({ roomCode, localStream, networkTier = 'high', onError
     const screenStreamRef = useRef<MediaStream | null>(null);
     // Bug 1 fix: buffer ICE candidates that arrive before setRemoteDescription
     const iceCandidateQueue = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
+    // Per-peer negotiation guard: prevents onnegotiationneeded from double-firing
+    // during the reconnect teardown+recreate cycle (causes 2-joined/no-video race).
+    const negotiatingRef = useRef<Map<string, boolean>>(new Map());
 
     // Always keep a fresh reference to callbacks and stream
     const onChatMessageRef = useRef(onChatMessage);
@@ -73,11 +77,13 @@ export function useWebRTC({ roomCode, localStream, networkTier = 'high', onError
     const onReactionRef = useRef(onReaction);
     const onPeerWaitingRef = useRef(onPeerWaiting);
     const onWaitingForApprovalRef = useRef(onWaitingForApproval);
+    const onScreenShareStopRef = useRef(onScreenShareStop);
     useEffect(() => { onChatMessageRef.current = onChatMessage; }, [onChatMessage]);
     useEffect(() => { onErrorRef.current = onError; }, [onError]);
     useEffect(() => { onReactionRef.current = onReaction; }, [onReaction]);
     useEffect(() => { onPeerWaitingRef.current = onPeerWaiting; }, [onPeerWaiting]);
     useEffect(() => { onWaitingForApprovalRef.current = onWaitingForApproval; }, [onWaitingForApproval]);
+    useEffect(() => { onScreenShareStopRef.current = onScreenShareStop; }, [onScreenShareStop]);
 
     // Re-apply encoding params whenever the network tier changes mid-call
     useEffect(() => {
@@ -190,12 +196,23 @@ export function useWebRTC({ roomCode, localStream, networkTier = 'high', onError
         };
 
         pc.oniceconnectionstatechange = () => {
-            if (pc.iceConnectionState === 'failed') pc.restartIce();
+            if (pc.iceConnectionState === 'failed') {
+                pc.restartIce();
+                // If still failed after 8 s, remove the ghost tile so the peer count is accurate
+                setTimeout(() => {
+                    if (pc.iceConnectionState === 'failed') {
+                        pc.close();
+                        pcs.current.delete(peerId);
+                        iceCandidateQueue.current.delete(peerId);
+                        negotiatingRef.current.delete(peerId);
+                        setPeers((prev) => { const next = new Map(prev); next.delete(peerId); return next; });
+                    }
+                }, 8000);
+            }
         };
 
         pc.onconnectionstatechange = () => {
             if (pc.connectionState === 'connected') {
-                // Apply bitrate caps as soon as the connection is established
                 applyEncodingParams(pc, networkTierRef.current);
                 setPeers((prev) => {
                     const next = new Map(prev);
@@ -203,33 +220,57 @@ export function useWebRTC({ roomCode, localStream, networkTier = 'high', onError
                     if (p) next.set(peerId, { ...p, connected: true });
                     return next;
                 });
+            } else if (pc.connectionState === 'failed') {
+                // Hard failure — remove peer tile immediately
+                pc.close();
+                pcs.current.delete(peerId);
+                iceCandidateQueue.current.delete(peerId);
+                negotiatingRef.current.delete(peerId);
+                setPeers((prev) => { const next = new Map(prev); next.delete(peerId); return next; });
+            } else if (pc.connectionState === 'disconnected') {
+                // Brief disconnection (tab switch, network hiccup) — give 12 s to recover
+                setTimeout(() => {
+                    if (pc.connectionState === 'disconnected') {
+                        pc.close();
+                        pcs.current.delete(peerId);
+                        iceCandidateQueue.current.delete(peerId);
+                        negotiatingRef.current.delete(peerId);
+                        setPeers((prev) => { const next = new Map(prev); next.delete(peerId); return next; });
+                    }
+                }, 12000);
             }
         };
 
         // ── Renegotiation (triggered when tracks are added late) ──────────────
-        // Wait for stable state instead of silently dropping when mid-negotiation.
-        // This ensures tracks added after connect() produce a real offer.
+        // Guard against: (a) closed PCs, (b) double-fire from room-joined teardown+recreate.
         pc.onnegotiationneeded = async () => {
+            // Exit immediately if the PC has been torn down
+            if (pc.signalingState === 'closed') return;
+            // Prevent re-entrant offers on the same peer during reconnect
+            if (negotiatingRef.current.get(peerId)) return;
+            negotiatingRef.current.set(peerId, true);
             try {
                 // If not stable, wait until signaling settles before proceeding
                 if (pc.signalingState !== 'stable') {
                     await new Promise<void>((resolve) => {
                         const check = () => {
-                            if (pc.signalingState === 'stable') {
+                            if (pc.signalingState === 'stable' || pc.signalingState === 'closed') {
                                 pc.removeEventListener('signalingstatechange', check);
                                 resolve();
                             }
                         };
                         pc.addEventListener('signalingstatechange', check);
-                        // Safety timeout: don't wait more than 5 s
                         setTimeout(resolve, 5000);
                     });
                 }
-                if (pc.signalingState !== 'stable') return; // still not stable after wait
+                if (pc.signalingState !== 'stable') return;
                 const offer = await pc.createOffer();
                 await pc.setLocalDescription(offer);
                 signaling.current?.sendTo(peerId, { type: 'offer', payload: offer });
             } catch { }
+            finally {
+                negotiatingRef.current.set(peerId, false);
+            }
         };
 
         return pc;
@@ -271,6 +312,7 @@ export function useWebRTC({ roomCode, localStream, networkTier = 'high', onError
                     pcs.current.get(existingPeer)!.close();
                     pcs.current.delete(existingPeer);
                     iceCandidateQueue.current.delete(existingPeer);
+                    negotiatingRef.current.delete(existingPeer); // reset negotiation guard
                 }
                 setPeers((prev) => {
                     const next = new Map(prev);
@@ -376,12 +418,20 @@ export function useWebRTC({ roomCode, localStream, networkTier = 'high', onError
             }
         });
 
-        // peer-meta (reactions + mute/video state)
+        // peer-meta (reactions + mute/video/screenshare state)
         client.on('peer-meta', (msg) => {
             if (!msg.from || !msg.payload) return;
             const p = msg.payload as Record<string, unknown>;
             if (p.action === 'reaction') {
                 onReactionRef.current?.(msg.from, String(p.emoji ?? ''));
+            } else if (p.action === 'screenshare') {
+                // Remote peer started or stopped screen sharing — update their tile label/state
+                setPeers((prev) => {
+                    const next = new Map(prev);
+                    const peer = next.get(msg.from!);
+                    if (peer) next.set(msg.from!, { ...peer, videoOff: false });
+                    return next;
+                });
             }
         });
 
@@ -409,7 +459,19 @@ export function useWebRTC({ roomCode, localStream, networkTier = 'high', onError
             pcs.current.get(id)?.close();
             pcs.current.delete(id);
             iceCandidateQueue.current.delete(id);
-            setPeers((prev) => { const next = new Map(prev); next.delete(id); return next; });
+            setPeers((prev) => {
+                const next = new Map(prev);
+                next.delete(id);
+                // Auto-stop our own screen share when there are no peers left
+                // (avoids leaving screen share running into the void after last peer leaves)
+                if (next.size === 0 && screenStreamRef.current) {
+                    screenStreamRef.current.getTracks().forEach(t => t.stop());
+                    screenStreamRef.current = null;
+                    setIsScreenSharing(false);
+                    onScreenShareStopRef.current?.();
+                }
+                return next;
+            });
         });
 
         // room-closed
@@ -452,13 +514,30 @@ export function useWebRTC({ roomCode, localStream, networkTier = 'high', onError
         signaling.current?.send({ type: 'peer-meta', payload: { action: 'reject', peerId } });
     }, []);
 
-    /** Toggle screen share. Replaces the video track on all PCs. Auto-reverts when user stops from browser UI. */
+    /** Toggle screen share. Replaces the video track on all PCs.
+     *  - On mobile (no getDisplayMedia support), shows a clear error.
+     *  - Auto-reverts when user stops from browser native UI.
+     *  - Broadcasts screenshare state via peer-meta so remote peers are notified. */
     const shareScreen = useCallback(async () => {
+        // ── Mobile detection ──────────────────────────────────────────────────
+        // getDisplayMedia is not available on iOS or most Android browsers.
+        // Detect early and surface a clear error rather than a cryptic failure.
+        const isMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+        if (isMobile && !('getDisplayMedia' in (navigator.mediaDevices ?? {}))) {
+            onErrorRef.current?.(
+                'Screen sharing is not supported on this device. ' +
+                'Please use a desktop browser to share your screen.'
+            );
+            return;
+        }
+
         if (isScreenSharing) {
             // Stop screen tracks and revert to camera
             screenStreamRef.current?.getTracks().forEach(t => t.stop());
             screenStreamRef.current = null;
             setIsScreenSharing(false);
+            // Notify peers we stopped
+            signaling.current?.send({ type: 'peer-meta', payload: { action: 'screenshare', active: false } });
             const camTrack = localStreamRef.current?.getVideoTracks()[0];
             if (camTrack) {
                 pcs.current.forEach(pc => {
@@ -466,7 +545,6 @@ export function useWebRTC({ roomCode, localStream, networkTier = 'high', onError
                     if (sender) {
                         sender.replaceTrack(camTrack).catch(console.error);
                     } else {
-                        // No video sender — add the camera track back
                         pc.addTrack(camTrack, localStreamRef.current!);
                     }
                 });
@@ -482,13 +560,13 @@ export function useWebRTC({ roomCode, localStream, networkTier = 'high', onError
             if (!screenTrack) return;
             screenStreamRef.current = screenStream;
             setIsScreenSharing(true);
+            // Notify peers we started
+            signaling.current?.send({ type: 'peer-meta', payload: { action: 'screenshare', active: true } });
             pcs.current.forEach(pc => {
                 const sender = pc.getSenders().find(s => s.track?.kind === 'video');
                 if (sender) {
-                    // Replace existing video sender — no renegotiation needed
                     sender.replaceTrack(screenTrack).catch(console.error);
                 } else {
-                    // No video sender yet — add track which triggers onnegotiationneeded
                     pc.addTrack(screenTrack, screenStream);
                 }
             });
@@ -496,6 +574,7 @@ export function useWebRTC({ roomCode, localStream, networkTier = 'high', onError
             screenTrack.onended = () => {
                 setIsScreenSharing(false);
                 screenStreamRef.current = null;
+                signaling.current?.send({ type: 'peer-meta', payload: { action: 'screenshare', active: false } });
                 const camTrack = localStreamRef.current?.getVideoTracks()[0];
                 if (camTrack) {
                     pcs.current.forEach(pc => {
@@ -505,7 +584,12 @@ export function useWebRTC({ roomCode, localStream, networkTier = 'high', onError
                     });
                 }
             };
-        } catch { /* user cancelled or permission denied */ }
+        } catch (err) {
+            // User cancelled — no-op. Any other error surfaces to UI.
+            if (err instanceof Error && err.name !== 'NotAllowedError' && err.name !== 'AbortError') {
+                onErrorRef.current?.(`Screen share failed: ${err.message}`);
+            }
+        }
     }, [isScreenSharing]);
 
     useEffect(() => () => disconnect(), [disconnect]);

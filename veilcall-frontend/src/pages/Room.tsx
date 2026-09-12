@@ -33,6 +33,7 @@ export default function Room() {
     const [messages, setMessages] = useState<ChatMessage[]>([]);
     const [expandedPeer, setExpandedPeer] = useState<string | null>(null);
     const [roomError, setRoomError] = useState<string | null>(null);
+    const [toastError, setToastError] = useState<string | null>(null); // non-fatal toast errors
     const [blurPanelOpen, setBlurPanelOpen] = useState(false);
     const [micStream, setMicStream] = useState<MediaStream | null>(null);
     // Bug 2 fix: use a stable MediaStream object; mutate tracks in-place so
@@ -92,11 +93,20 @@ export default function Room() {
             roomCode,
             localStream,
             networkTier,
-            onError: setRoomError,
+            onError: (msg) => {
+                // Screen share errors and similar are non-fatal — show as toast
+                // Room-level errors (room not found, full, closed) remain full-screen
+                if (msg.startsWith('Screen share')) {
+                    setToastError(msg);
+                } else {
+                    setRoomError(msg);
+                }
+            },
             onChatMessage: handleChatMessage,
             onReaction: handleReaction,
             onPeerWaiting: (peerId) => setWaitingPeers(prev => [...prev, peerId]),
             onWaitingForApproval: () => setIsWaitingOverlay(true),
+            onScreenShareStop: () => { /* isScreenSharing is already reset inside hook */ },
         });
 
     // Keep stableLocalStream in sync with whatever tracks are currently available.
@@ -633,6 +643,21 @@ export default function Room() {
                         className="recording-toast-close"
                         aria-label="Dismiss"
                         onClick={() => setRecordingToastDismissed(true)}
+                    >✕</button>
+                </div>
+            )}
+            {/* ── Non-fatal error toast (e.g. screen share unsupported on mobile) ── */}
+            {toastError && (
+                <div className="recording-toast" role="alert">
+                    <span className="recording-toast-icon">⚠️</span>
+                    <div className="recording-toast-body">
+                        <strong>Notice</strong>
+                        <span>{toastError}</span>
+                    </div>
+                    <button
+                        className="recording-toast-close"
+                        aria-label="Dismiss"
+                        onClick={() => setToastError(null)}
                     >✕</button>
                 </div>
             )}

@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import AdBanner from '../components/AdBanner';
+import { usePWAInstall } from '../hooks/usePWAInstall';
 
 const features = [
     { icon: '🕶️', title: 'Face Blurred by Default', desc: 'Your face is blurred on your device before it ever touches the network. You control when — and if — anyone sees the real you.' },
@@ -28,6 +29,12 @@ const funCards = [
 export default function Home() {
     const navigate = useNavigate();
     const [joinCode, setJoinCode] = useState('');
+    const { canInstall, triggerInstall, isInstalled } = usePWAInstall();
+
+    // Detect iOS — needs manual Add to Home Screen instructions
+    const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !(window as any).MSStream;
+    const isInStandaloneMode = (window.matchMedia('(display-mode: standalone)').matches) || ((navigator as any).standalone === true);
+    const showIOSHint = isIOS && !isInStandaloneMode && !isInstalled;
 
     const handleJoin = (e: React.FormEvent) => {
         e.preventDefault();
@@ -88,6 +95,33 @@ export default function Home() {
                         />
                         <button type="submit" className="btn btn-primary">Join</button>
                     </form>
+
+                    {/* PWA Install prompt — Android/Desktop */}
+                    {canInstall && (
+                        <button
+                            className="pwa-install-banner"
+                            onClick={triggerInstall}
+                            aria-label="Install Veilcall as an app"
+                        >
+                            <span className="pwa-install-icon">📲</span>
+                            <span className="pwa-install-text">
+                                <strong>Add to Home Screen</strong>
+                                <span>Install Veilcall for a faster app-like experience</span>
+                            </span>
+                            <span className="pwa-install-cta">Install →</span>
+                        </button>
+                    )}
+
+                    {/* iOS: no beforeinstallprompt — show manual instructions */}
+                    {showIOSHint && (
+                        <div className="pwa-install-banner pwa-install-ios">
+                            <span className="pwa-install-icon">📲</span>
+                            <span className="pwa-install-text">
+                                <strong>Add to Home Screen</strong>
+                                <span>Tap <strong>Share ⎙</strong> → <strong>Add to Home Screen</strong></span>
+                            </span>
+                        </div>
+                    )}
                 </div>
 
                 {/* Hero preview mockup */}
@@ -319,6 +353,31 @@ export default function Home() {
         /* CTA */
         .cta-banner { padding: var(--sp-8) 0; }
         .cta-content { padding: var(--sp-12) var(--sp-8); text-align: center; background: linear-gradient(135deg, rgba(99,102,241,0.15), rgba(6,182,212,0.1)); }
+        .cta-content h2 { margin-bottom: var(--sp-4); }
+        .cta-content p { margin-bottom: var(--sp-6); }
+
+        /* PWA Install banner */
+        .pwa-install-banner {
+          display: flex; align-items: center; gap: var(--sp-3);
+          margin-top: var(--sp-4); padding: 12px 18px;
+          max-width: 420px; width: 100%;
+          background: rgba(99,102,241,0.12);
+          border: 1px solid rgba(99,102,241,0.35);
+          border-radius: var(--rad-xl, 16px);
+          cursor: pointer; text-align: left;
+          transition: background 0.2s, border-color 0.2s;
+          color: var(--clr-text);
+          font-family: inherit;
+          animation: toast-slide-in 0.4s ease;
+        }
+        .pwa-install-banner:hover { background: rgba(99,102,241,0.2); border-color: rgba(99,102,241,0.6); }
+        .pwa-install-ios { cursor: default; background: rgba(251,191,36,0.08); border-color: rgba(251,191,36,0.35); }
+        .pwa-install-ios:hover { background: rgba(251,191,36,0.12); border-color: rgba(251,191,36,0.5); }
+        .pwa-install-icon { font-size: 1.5rem; flex-shrink: 0; }
+        .pwa-install-text { display: flex; flex-direction: column; gap: 2px; flex: 1; }
+        .pwa-install-text strong { font-size: 0.9rem; color: var(--clr-text); }
+        .pwa-install-text span { font-size: 0.78rem; color: var(--clr-text-2); }
+        .pwa-install-cta { font-size: 0.85rem; font-weight: 600; color: #a5b4fc; white-space: nowrap; flex-shrink: 0; }
         .cta-content h2 { margin-bottom: var(--sp-4); }
         .cta-content p { margin-bottom: var(--sp-6); }
       `}</style>

@@ -96,7 +96,7 @@ function sanitizeMessage(raw, fromPeerId) {
         if (!p || typeof p !== 'object') return null;
         const action = p.action;
         if (typeof action !== 'string') return null;
-        const ALLOWED_ACTIONS = new Set(['reaction', 'approve', 'reject', 'mute', 'video']);
+        const ALLOWED_ACTIONS = new Set(['reaction', 'approve', 'reject', 'mute', 'video', 'screenshare']);
         if (!ALLOWED_ACTIONS.has(action)) return null;
         // Emoji: max 8 chars (covers multi-codepoint emoji like flags)
         if (action === 'reaction') {
