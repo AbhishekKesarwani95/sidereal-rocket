@@ -108,6 +108,27 @@ export function useWebRTC({ roomCode, localStream, networkTier = 'high', onError
         });
     }, [localStream]);
 
+    /**
+     * Explicitly push current tracks from localStreamRef to all existing PCs.
+     * Call this after mutating a stable MediaStream in-place (add/removeTrack),
+     * since React won't re-fire the localStream effect for the same object reference.
+     */
+    const refreshTracks = useCallback(() => {
+        const stream = localStreamRef.current;
+        if (!stream) return;
+        pcs.current.forEach((pc) => {
+            const senders = pc.getSenders();
+            stream.getTracks().forEach((track) => {
+                const existing = senders.find((s) => s.track?.kind === track.kind);
+                if (existing) {
+                    existing.replaceTrack(track).catch(console.error);
+                } else {
+                    pc.addTrack(track, stream);
+                }
+            });
+        });
+    }, []);
+
     const getIceServers = useCallback((): RTCIceServer[] => {
         const servers: RTCIceServer[] = [
             { urls: 'stun:stun.l.google.com:19302' },
@@ -139,6 +160,14 @@ export function useWebRTC({ roomCode, localStream, networkTier = 'high', onError
         // ── Remote stream ─────────────────────────────────────────────────────
         const remoteStream = new MediaStream();
         pc.ontrack = (e) => {
+            // Bug 1 fix: always add e.track directly (Firefox/Safari deliver track
+            // without populating e.streams[], so e.streams[0] alone is not reliable)
+            if (e.track && !remoteStream.getTrackById(e.track.id)) {
+                remoteStream.addTrack(e.track);
+                // When the track ends, remove it so the tile updates correctly
+                e.track.onended = () => remoteStream.removeTrack(e.track);
+            }
+            // Also sync tracks from the MediaStream if present (Chrome compat)
             e.streams[0]?.getTracks().forEach((t) => {
                 if (!remoteStream.getTrackById(t.id)) remoteStream.addTrack(t);
             });
@@ -178,10 +207,25 @@ export function useWebRTC({ roomCode, localStream, networkTier = 'high', onError
         };
 
         // ── Renegotiation (triggered when tracks are added late) ──────────────
-        // Bug 5 fix: guard against glare — only send offer when state is stable
+        // Wait for stable state instead of silently dropping when mid-negotiation.
+        // This ensures tracks added after connect() produce a real offer.
         pc.onnegotiationneeded = async () => {
-            if (pc.signalingState !== 'stable') return;
             try {
+                // If not stable, wait until signaling settles before proceeding
+                if (pc.signalingState !== 'stable') {
+                    await new Promise<void>((resolve) => {
+                        const check = () => {
+                            if (pc.signalingState === 'stable') {
+                                pc.removeEventListener('signalingstatechange', check);
+                                resolve();
+                            }
+                        };
+                        pc.addEventListener('signalingstatechange', check);
+                        // Safety timeout: don't wait more than 5 s
+                        setTimeout(resolve, 5000);
+                    });
+                }
+                if (pc.signalingState !== 'stable') return; // still not stable after wait
                 const offer = await pc.createOffer();
                 await pc.setLocalDescription(offer);
                 signaling.current?.sendTo(peerId, { type: 'offer', payload: offer });
@@ -426,5 +470,5 @@ export function useWebRTC({ roomCode, localStream, networkTier = 'high', onError
 
     useEffect(() => () => disconnect(), [disconnect]);
 
-    return { myPeerId, peers, connected, connect, disconnect, sendChatMessage, sendReaction, shareScreen, isScreenSharing, approvePeer, rejectPeer, isWaiting };
+    return { myPeerId, peers, connected, connect, disconnect, sendChatMessage, sendReaction, shareScreen, isScreenSharing, approvePeer, rejectPeer, isWaiting, refreshTracks };
 }

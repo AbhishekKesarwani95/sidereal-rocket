@@ -35,7 +35,10 @@ export default function Room() {
     const [roomError, setRoomError] = useState<string | null>(null);
     const [blurPanelOpen, setBlurPanelOpen] = useState(false);
     const [micStream, setMicStream] = useState<MediaStream | null>(null);
-    const [localStream, setLocalStream] = useState<MediaStream | null>(null);
+    // Bug 2 fix: use a stable MediaStream object; mutate tracks in-place so
+    // useWebRTC's replaceTrack/addTrack always operates on the same reference.
+    const stableLocalStream = useRef<MediaStream>(new MediaStream());
+    const [localStream, setLocalStream] = useState<MediaStream>(stableLocalStream.current);
     const chatEndRef = useRef<HTMLDivElement>(null);
     const chatInputRef = useRef<HTMLInputElement>(null);
     const [replyingTo, setReplyingTo] = useState<{ from: string; text: string } | null>(null);
@@ -68,14 +71,6 @@ export default function Room() {
     const [threatToastDismissed, setThreatToastDismissed] = useState(false);
     useEffect(() => { if (backCam.threatDetected) setThreatToastDismissed(false); }, [backCam.threatDetected]);
 
-    // Assemble combined stream whenever video or mic changes
-    useEffect(() => {
-        if (!blurredStreamState) return;
-        setLocalStream(new MediaStream([
-            ...blurredStreamState.getVideoTracks(),
-            ...(micStream?.getAudioTracks() ?? []),
-        ]));
-    }, [blurredStreamState, micStream]);
 
     // ── Must be defined BEFORE useWebRTC to satisfy Rules of Hooks ───────────
     const handleChatMessage = useCallback((from: string, text: string, ts: number, replyTo?: { from: string; text: string }) => {
@@ -93,7 +88,7 @@ export default function Room() {
     }, []);
 
     const { peers, connected, connect, disconnect, sendChatMessage, sendReaction,
-        shareScreen, isScreenSharing, approvePeer, rejectPeer, isWaiting } = useWebRTC({
+        shareScreen, isScreenSharing, approvePeer, rejectPeer, isWaiting, refreshTracks } = useWebRTC({
             roomCode,
             localStream,
             networkTier,
@@ -103,6 +98,21 @@ export default function Room() {
             onPeerWaiting: (peerId) => setWaitingPeers(prev => [...prev, peerId]),
             onWaitingForApproval: () => setIsWaitingOverlay(true),
         });
+
+    // Bug 2 fix: mutate the stable stream in-place instead of creating a new object.
+    // Placed AFTER useWebRTC so that refreshTracks is in scope.
+    // This keeps the same MediaStream reference alive so WebRTC senders replaceTrack reliably.
+    useEffect(() => {
+        const s = stableLocalStream.current;
+        s.getVideoTracks().forEach(t => s.removeTrack(t));
+        blurredStreamState?.getVideoTracks().forEach(t => s.addTrack(t));
+        s.getAudioTracks().forEach(t => s.removeTrack(t));
+        micStream?.getAudioTracks().forEach(t => s.addTrack(t));
+        setLocalStream(s);
+        // Push updated tracks to any already-open PCs (same stream ref won't re-trigger
+        // the localStream effect in useWebRTC naturally)
+        refreshTracks();
+    }, [blurredStreamState, micStream]); // eslint-disable-line
 
     // ── Connect immediately on mount ─────────────────────────────────────────
     // (connect() is now deferred below until micStream is ready — see Bug 6 fix)
@@ -170,8 +180,15 @@ export default function Room() {
         return () => { ref?.getTracks().forEach(t => t.stop()); };
     }, []); // eslint-disable-line
 
-    // ── Connect: wait for mic to be ready (or 2s timeout) before connecting ──
-    // Bug 6 fix: ensures audio tracks are in localStream before first offer
+    // ── Connect: wait for BOTH mic AND blurred camera stream before connecting ──
+    // Bug 3 fix: ensures tracks exist in localStream before the first offer is sent.
+    // Without this, connect() fires before the canvas captureStream is ready →
+    // no senders exist → no offer → one or both sides never get video.
+    const blurStreamReadyRef = useRef(false);
+    useEffect(() => {
+        if (blurredStreamState) blurStreamReadyRef.current = true;
+    }, [blurredStreamState]);
+
     const didConnect = useRef(false);
     useEffect(() => {
         if (!roomCode || didConnect.current) return;
@@ -180,12 +197,12 @@ export default function Room() {
             didConnect.current = true;
             connect();
         };
-        // Kick off immediately if mic already resolved (fast path)
-        if (micReadyRef.current) { tryConnect(); return; }
-        // Otherwise wait for micStream state or timeout
-        const timer = setTimeout(tryConnect, 2000);
+        // Fast path: both streams already ready
+        if (micReadyRef.current && blurStreamReadyRef.current) { tryConnect(); return; }
+        // Otherwise wait — max 4 s so a camera denial doesn't block forever
+        const timer = setTimeout(tryConnect, 4000);
         return () => clearTimeout(timer);
-    }, [roomCode, micStream]); // eslint-disable-line
+    }, [roomCode, micStream, blurredStreamState]); // eslint-disable-line
 
     // ── Cleanup on unmount ───────────────────────────────────────────────────
     useEffect(() => () => disconnect(), []); // eslint-disable-line
