@@ -302,17 +302,18 @@ export function useWebRTC({ roomCode, localStream, networkTier = 'high', onError
         const client = new SignalingClient(getSignalServer(), roomCode, peerId);
         signaling.current = client;
 
-        // room-joined: we just entered the room (also fires on reconnect)
+        // room-joined: WE just entered the room. WE are the offerer for every existing peer.
+        // Do NOT call createPeerConnection here (it triggers onnegotiationneeded which races
+        // with our explicit createOffer below). Instead, build the PC manually.
         client.on('room-joined', async (msg) => {
             setConnected(true);
             for (const existingPeer of msg.peers ?? []) {
-                // On reconnect, a stale PC may already exist — tear it down cleanly
-                // so negotiation starts fresh with the correct tracks.
+                // On reconnect, tear down any stale PC first
                 if (pcs.current.has(existingPeer)) {
                     pcs.current.get(existingPeer)!.close();
                     pcs.current.delete(existingPeer);
                     iceCandidateQueue.current.delete(existingPeer);
-                    negotiatingRef.current.delete(existingPeer); // reset negotiation guard
+                    negotiatingRef.current.delete(existingPeer);
                 }
                 setPeers((prev) => {
                     const next = new Map(prev);
@@ -320,20 +321,41 @@ export function useWebRTC({ roomCode, localStream, networkTier = 'high', onError
                         next.set(existingPeer, { peerId: existingPeer, stream: null, connected: false, muted: false, videoOff: false });
                     return next;
                 });
-                // We are initiator: pre-create PC (tracks added now if camera is ready,
-                // or later via onnegotiationneeded when tracks arrive)
+
+                // Mark as negotiating BEFORE creating PC so onnegotiationneeded is suppressed.
+                // We will drive the offer ourselves below.
+                negotiatingRef.current.set(existingPeer, true);
                 const pc = createPeerConnection(existingPeer);
-                // Only create offer if we already have tracks; otherwise onnegotiationneeded will fire
-                if (pc.getSenders().length > 0) {
+
+                try {
+                    // Wait for stable (PC is new so should be immediate)
+                    if (pc.signalingState !== 'stable') {
+                        await new Promise<void>((resolve) => {
+                            const check = () => {
+                                if (pc.signalingState === 'stable' || pc.signalingState === 'closed') {
+                                    pc.removeEventListener('signalingstatechange', check);
+                                    resolve();
+                                }
+                            };
+                            pc.addEventListener('signalingstatechange', check);
+                            setTimeout(resolve, 4000);
+                        });
+                    }
+                    if (pc.signalingState !== 'stable') continue;
                     const offer = await pc.createOffer();
                     await pc.setLocalDescription(offer);
                     client.sendTo(existingPeer, { type: 'offer', payload: offer });
+                } catch (e) {
+                    console.error('[useWebRTC] offer creation failed', e);
+                } finally {
+                    negotiatingRef.current.set(existingPeer, false);
                 }
-                // If no tracks yet, onnegotiationneeded fires when tracks are added
             }
         });
 
-        // peer-joined: someone new arrived; they will initiate
+        // peer-joined: an existing peer; THEY are the offerer — we just wait for their offer.
+        // Suppress onnegotiationneeded on our side by pre-setting the guard so we don't
+        // accidentally race them with our own offer (classic glare).
         client.on('peer-joined', (msg) => {
             const id = msg.from ?? (msg as any).peerId;
             if (!id) return;
@@ -343,39 +365,58 @@ export function useWebRTC({ roomCode, localStream, networkTier = 'high', onError
                     next.set(id, { peerId: id, stream: null, connected: false, muted: false, videoOff: false });
                 return next;
             });
-            createPeerConnection(id); // pre-create so offer arrives to a ready PC
+            // Pre-set guard: the joining peer will send the offer; we must not send one too.
+            negotiatingRef.current.set(id, true);
+            createPeerConnection(id);
+            // Clear guard after a short window so normal renegotiation (e.g. track changes)
+            // works later. Using setTimeout(0) lets the current addTrack onnegotiationneeded
+            // fire-and-be-suppressed before we clear.
+            setTimeout(() => negotiatingRef.current.set(id, false), 500);
         });
 
-        // offer: remote is initiating
+        // offer: remote peer (the joiner) is initiating — we are the answerer.
+        // Pre-set the guard before createPeerConnection to prevent our onnegotiationneeded
+        // from firing a competing offer while we process theirs.
         client.on('offer', async (msg) => {
             if (!msg.from || !msg.payload) return;
-            // If a PC already exists and is stable/have-local-offer, close it first
-            // (can happen on reconnect when both sides race to offer)
+
+            // Suppress onnegotiationneeded on our side — we're the answerer here
+            negotiatingRef.current.set(msg.from, true);
+
+            // Tear down any existing closed PC so we start fresh
             const existing = pcs.current.get(msg.from);
             if (existing && existing.signalingState !== 'closed') {
-                // Only tear down if we don't have a local offer pending
-                // (if we do, the glare-resolution in onnegotiationneeded handles it)
-                if (existing.signalingState === 'stable') {
+                if (existing.signalingState !== 'have-local-offer') {
                     existing.close();
                     pcs.current.delete(msg.from);
                     iceCandidateQueue.current.delete(msg.from);
                 }
             }
+
             const pc = createPeerConnection(msg.from);
-            // Guard: only set remote desc if we can accept an offer
-            if (pc.signalingState !== 'stable' && pc.signalingState !== 'have-remote-offer') return;
-            await pc.setRemoteDescription(
-                new RTCSessionDescription(msg.payload as RTCSessionDescriptionInit),
-            );
-            // Flush queued ICE candidates now that remote SDP is set
-            const queued = iceCandidateQueue.current.get(msg.from) ?? [];
-            iceCandidateQueue.current.delete(msg.from);
-            for (const c of queued) {
-                try { await pc.addIceCandidate(new RTCIceCandidate(c)); } catch { }
+            if (pc.signalingState !== 'stable' && pc.signalingState !== 'have-remote-offer') {
+                negotiatingRef.current.set(msg.from, false);
+                return;
             }
-            const answer = await pc.createAnswer();
-            await pc.setLocalDescription(answer);
-            client.sendTo(msg.from, { type: 'answer', payload: answer });
+            try {
+                await pc.setRemoteDescription(
+                    new RTCSessionDescription(msg.payload as RTCSessionDescriptionInit),
+                );
+                // Flush queued ICE candidates
+                const queued = iceCandidateQueue.current.get(msg.from) ?? [];
+                iceCandidateQueue.current.delete(msg.from);
+                for (const c of queued) {
+                    try { await pc.addIceCandidate(new RTCIceCandidate(c)); } catch { }
+                }
+                const answer = await pc.createAnswer();
+                await pc.setLocalDescription(answer);
+                client.sendTo(msg.from, { type: 'answer', payload: answer });
+            } catch (e) {
+                console.error('[useWebRTC] answer creation failed', e);
+            } finally {
+                // Release guard so future renegotiation (e.g. track changes) works
+                negotiatingRef.current.set(msg.from, false);
+            }
         });
 
         // answer: remote answered our offer

@@ -73,4 +73,26 @@ function listPublicRooms(req, res) {
     res.json({ rooms });
 }
 
-module.exports = { healthCheck, createRoom, joinRoom, listPublicRooms };
+/**
+ * POST /api/random-match
+ * Body: { interests?: string[] }
+ * Queues the caller for a 1-to-1 interest-based match.
+ * Waits up to 30 s for a partner; falls back to a solo room.
+ * Returns { code, turnCreds } on match.
+ */
+async function randomMatch(req, res) {
+    const rawInterests = req.body?.interests;
+    const interests = Array.isArray(rawInterests)
+        ? rawInterests.slice(0, 10).map(String).map(s => s.slice(0, 32).trim()).filter(Boolean)
+        : [];
+
+    try {
+        const result = await roomService.findOrCreateMatch(interests);
+        res.json(result);
+    } catch (err) {
+        console.error('[randomMatch] error', err);
+        res.status(500).json({ error: 'Matchmaking failed. Please try again.' });
+    }
+}
+
+module.exports = { healthCheck, createRoom, joinRoom, listPublicRooms, randomMatch };
