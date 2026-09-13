@@ -53,7 +53,7 @@ async function applyEncodingParams(pc: RTCPeerConnection, tier: NetworkTier) {
     }
 }
 
-export function useWebRTC({ roomCode, localStream, networkTier = 'high', onError, onChatMessage, onReaction, onPeerWaiting, onWaitingForApproval, onScreenShareStop }: UseWebRTCOptions) {
+export function useWebRTC({ roomCode, localStream, networkTier = 'high', autoConnect = false, onError, onChatMessage, onReaction, onPeerWaiting, onWaitingForApproval, onScreenShareStop }: UseWebRTCOptions & { autoConnect?: boolean }) {
     const [myPeerId, setMyPeerId] = useState<string>('');
     const [peers, setPeers] = useState<Map<string, PeerState>>(new Map());
     const [connected, setConnected] = useState(false);
@@ -113,6 +113,24 @@ export function useWebRTC({ roomCode, localStream, networkTier = 'high', onError
             void peerId; // suppress warning
         });
     }, [localStream]);
+
+    // ── Auto-connect: fires once when roomCode + localStream are both ready ───
+    // This eliminates the stale-closure bug when the caller passes `autoConnect`.
+    const autoConnectFiredRef = useRef(false);
+    useEffect(() => {
+        if (!autoConnect) return;
+        // Reset guard whenever roomCode changes so each new match gets a fresh connect
+        autoConnectFiredRef.current = false;
+    }, [roomCode, autoConnect]);
+    useEffect(() => {
+        if (!autoConnect) return;
+        if (autoConnectFiredRef.current) return;
+        if (!roomCode) return;
+        const hasTracks = (localStream?.getTracks().length ?? 0) > 0;
+        if (!hasTracks) return;
+        autoConnectFiredRef.current = true;
+        connect();
+    }, [autoConnect, roomCode, localStream, connect]);
 
     /**
      * Explicitly push current tracks from localStreamRef to all existing PCs.
