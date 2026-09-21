@@ -114,23 +114,8 @@ export function useWebRTC({ roomCode, localStream, networkTier = 'high', autoCon
         });
     }, [localStream]);
 
-    // ── Auto-connect: fires once when roomCode + localStream are both ready ───
-    // This eliminates the stale-closure bug when the caller passes `autoConnect`.
+    // autoConnectFiredRef is used by effects placed AFTER connect() is declared (below)
     const autoConnectFiredRef = useRef(false);
-    useEffect(() => {
-        if (!autoConnect) return;
-        // Reset guard whenever roomCode changes so each new match gets a fresh connect
-        autoConnectFiredRef.current = false;
-    }, [roomCode, autoConnect]);
-    useEffect(() => {
-        if (!autoConnect) return;
-        if (autoConnectFiredRef.current) return;
-        if (!roomCode) return;
-        const hasTracks = (localStream?.getTracks().length ?? 0) > 0;
-        if (!hasTracks) return;
-        autoConnectFiredRef.current = true;
-        connect();
-    }, [autoConnect, roomCode, localStream, connect]);
 
     /**
      * Explicitly push current tracks from localStreamRef to all existing PCs.
@@ -473,7 +458,8 @@ export function useWebRTC({ roomCode, localStream, networkTier = 'high', autoCon
         client.on('chat', (msg) => {
             if (msg.from && msg.payload) {
                 const { text, ts } = msg.payload as { text: string; ts: number };
-                onChatMessageRef.current?.(msg.from, text, ts ?? Date.now());
+                // Note: callback signature is (text, from, ts)
+                onChatMessageRef.current?.(text, msg.from, ts ?? Date.now());
             }
         });
 
@@ -541,6 +527,22 @@ export function useWebRTC({ roomCode, localStream, networkTier = 'high', autoCon
 
         client.connect();
     }, [roomCode, createPeerConnection]);
+
+    // ── Auto-connect effects (must be after `connect` is declared) ────────────
+    // Effect 1: reset the once-per-room guard whenever roomCode changes
+    useEffect(() => {
+        if (!autoConnect) return;
+        autoConnectFiredRef.current = false;
+    }, [roomCode, autoConnect]);
+    // Effect 2: call connect() once roomCode + localStream are both ready
+    useEffect(() => {
+        if (!autoConnect) return;
+        if (autoConnectFiredRef.current) return;
+        if (!roomCode) return;
+        if ((localStream?.getTracks().length ?? 0) === 0) return;
+        autoConnectFiredRef.current = true;
+        connect();
+    }, [autoConnect, roomCode, localStream, connect]);
 
     const disconnect = useCallback(() => {
         signaling.current?.disconnect();
