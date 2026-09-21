@@ -86,12 +86,25 @@ async function randomMatch(req, res) {
         ? rawInterests.slice(0, 10).map(String).map(s => s.slice(0, 32).trim()).filter(Boolean)
         : [];
 
+    // Guard: if client disconnects before we respond, stop the matchmaking promise
+    // from replying to a dead socket (which would throw an unhandled error).
+    let clientGone = false;
+    req.on('close', () => { clientGone = true; });
+
+    // Server-side safety timeout: respond after 32s if matchmaking hangs
+    const timeoutId = setTimeout(() => {
+        if (!res.headersSent) res.status(503).json({ error: 'Matchmaking timed out. Please try again.' });
+    }, 32_000);
+
     try {
         const result = await roomService.findOrCreateMatch(interests);
-        res.json(result);
+        clearTimeout(timeoutId);
+        if (!clientGone && !res.headersSent) res.json(result);
     } catch (err) {
+        clearTimeout(timeoutId);
         console.error('[randomMatch] error', err);
-        res.status(500).json({ error: 'Matchmaking failed. Please try again.' });
+        if (!clientGone && !res.headersSent)
+            res.status(500).json({ error: 'Matchmaking failed. Please try again.' });
     }
 }
 

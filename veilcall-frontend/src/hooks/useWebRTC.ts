@@ -110,6 +110,8 @@ export function useWebRTC({ roomCode, localStream, networkTier = 'high', autoCon
                     // addTrack triggers onnegotiationneeded which re-offers automatically
                 }
             });
+            // Re-apply bitrate caps immediately after tracks land
+            applyEncodingParams(pc, networkTierRef.current);
             void peerId; // suppress warning
         });
     }, [localStream]);

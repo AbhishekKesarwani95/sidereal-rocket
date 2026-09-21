@@ -130,11 +130,16 @@ function sanitizeMessage(raw, fromPeerId) {
 function handleConnection(ws, req) {
     // ── Origin check (CORS doesn't apply to WS upgrades) ─────────────────────
     const origin = req.headers['origin'];
-    const allowedOrigin = config.FRONTEND_URL;
-    const isDev = !allowedOrigin || process.env.NODE_ENV !== 'production';
-    const originAllowed = !origin
-        || (allowedOrigin && origin === allowedOrigin)
-        || (isDev && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin));
+    // Build the same allowed-origins set used by the HTTP CORS middleware
+    const allowedWsOrigins = new Set();
+    if (config.FRONTEND_URL) allowedWsOrigins.add(config.FRONTEND_URL.trim().replace(/\/$/, ''));
+    if (config.FRONTEND_URL_2) allowedWsOrigins.add(config.FRONTEND_URL_2.trim().replace(/\/$/, ''));
+    const isDev = allowedWsOrigins.size === 0 || process.env.NODE_ENV !== 'production';
+    const localhostRe = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/;
+    const normOrigin = origin ? origin.trim().replace(/\/$/, '') : null;
+    const originAllowed = !normOrigin
+        || allowedWsOrigins.has(normOrigin)
+        || (isDev && localhostRe.test(normOrigin));
     if (!originAllowed) {
         ws.close(1008, 'Origin not allowed');
         return;

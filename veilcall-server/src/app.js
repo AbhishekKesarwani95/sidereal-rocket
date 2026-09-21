@@ -26,19 +26,25 @@ function createApp() {
         contentSecurityPolicy: {
             directives: {
                 defaultSrc: ["'self'"],
-                scriptSrc: ["'self'", "'wasm-unsafe-eval'"],          // wasm needed for MediaPipe
-                styleSrc: ["'self'", "'unsafe-inline'"],
+                scriptSrc: ["'self'", "'wasm-unsafe-eval'", 'https://cdn.jsdelivr.net'],
+                // Block all inline event handlers (onclick= etc.) — XSS hardening
+                scriptSrcAttr: ["'none'"],
+                styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
                 imgSrc: ["'self'", 'data:', 'blob:'],
                 mediaSrc: ["'self'", 'blob:'],
                 connectSrc: [
                     "'self'",
                     'wss:',                                                  // WebSocket signaling
+                    'ws:',                                                   // WS in dev (non-TLS)
                     'https://cdn.jsdelivr.net',                              // MediaPipe WASM
                     'https://storage.googleapis.com',                        // MediaPipe model
                     ...(config.FRONTEND_URL ? [config.FRONTEND_URL] : []),
+                    ...(config.FRONTEND_URL_2 ? [config.FRONTEND_URL_2] : []),
                 ],
                 workerSrc: ["'self'", 'blob:'],
-                fontSrc: ["'self'", 'https://fonts.gstatic.com'],
+                fontSrc: ["'self'", 'https://fonts.gstatic.com', 'https://fonts.googleapis.com'],
+                // Block all framing — belt AND braces alongside X-Frame-Options
+                frameAncestors: ["'none'"],
                 frameSrc: ["'none'"],
                 objectSrc: ["'none'"],
                 baseUri: ["'self'"],

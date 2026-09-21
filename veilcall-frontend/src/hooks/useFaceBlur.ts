@@ -41,9 +41,9 @@ const TIER_FPS: Record<NetworkTier, number> = {
 
 /** Face detection interval per tier (ms) */
 const TIER_DETECTION_MS: Record<NetworkTier, number> = {
-    low: 0,   // skip ML detection on low — use center-region fallback only
-    mid: 100,
-    high: 66,
+    low: 0,    // skip ML detection on low — use motion centroid only
+    mid: 66,   // ~15 Hz detection
+    high: 33,  // ~30 Hz detection — matches typical RAF rate
 };
 
 // Low-fidelity face box for smoothing
@@ -220,7 +220,7 @@ export function useFaceBlur(
         motionCanvas.width = 16;
         motionCanvas.height = 9;
         const mCtx = motionCanvas.getContext('2d', { willReadFrequently: true })!;
-        const MOTION_THRESHOLD = 20; // per-channel avg change that counts as "motion"
+        const MOTION_THRESHOLD = 12; // lower threshold = more sensitive to movement
 
         function detectMotion(): boolean {
             mCtx.drawImage(video!, 0, 0, 16, 9);
@@ -273,7 +273,13 @@ export function useFaceBlur(
         }
 
         let noDetectionFrames = 0; // frames since last successful ML face detection
-        const NO_DETECTION_EXPIRE = 15; // clear stale box after ~0.5 s at 30fps
+        const NO_DETECTION_EXPIRE = 5; // dissolve stale box after ~160ms at 30fps
+
+        // Velocity tracking for adaptive lerp
+        // When the detected box is moving fast we snap to it (lerpT→1)
+        // When stationary we use a medium-smoothing factor
+        let prevDetected: FaceBox | null = null;
+        let velocityMag = 0; // normalised 0-1 per canvas dimension per frame
 
         let flickerFrame = 0; // for anti-camera flicker shield
 
@@ -301,13 +307,14 @@ export function useFaceBlur(
             }
 
             // ── Motion-adaptive detection interval ────────────────────────────
-            // Check motion every ~10 frames to keep cost low
-            if (flickerFrame % 10 === 0) {
+            // Check motion every 3 frames — fast enough to react within 100ms
+            if (flickerFrame % 3 === 0) {
                 motionDetected = detectMotion();
             }
             const BASE_INTERVAL = TIER_DETECTION_MS[networkTierRef.current];
-            // When motion detected: use 1/3 of base interval (more frequent)
-            const DETECTION_INTERVAL = motionDetected ? Math.max(33, BASE_INTERVAL / 3) : BASE_INTERVAL;
+            // When motion detected: run detection at FULL rate (BASE_INTERVAL)
+            // When idle: allow up to 2× interval (saves CPU without visible lag)
+            const DETECTION_INTERVAL = motionDetected ? BASE_INTERVAL : Math.min(BASE_INTERVAL * 2, 150);
 
             // On low tier, skip ML face detection entirely — use center-region fallback
             const useMlDetection = TIER_DETECTION_MS[networkTierRef.current] > 0;
@@ -336,6 +343,16 @@ export function useFaceBlur(
                     noDetectionFrames++;
                 } else {
                     noDetectionFrames = 0;
+
+                    // ── Velocity-based adaptive lerp ─────────────────────────────
+                    // Measure how much the first detected face moved since last frame.
+                    // If fast → snap instantly (lerpT→1); if slow → smooth (lerpT→0.65)
+                    if (prevDetected && detected[0]) {
+                        const dx = (detected[0].x - prevDetected.x) / (canvas.width || 640);
+                        const dy = (detected[0].y - prevDetected.y) / (canvas.height || 480);
+                        velocityMag = Math.sqrt(dx * dx + dy * dy);
+                    }
+                    if (detected[0]) prevDetected = { ...detected[0] };
                 }
                 // After enough frames with no detection, dissolve the blur region
                 if (noDetectionFrames > NO_DETECTION_EXPIRE) {
@@ -346,8 +363,15 @@ export function useFaceBlur(
                     smoothedBoxesRef.current.push({ ...detected[smoothedBoxesRef.current.length] });
                 }
                 smoothedBoxesRef.current = smoothedBoxesRef.current.slice(0, detected.length);
-                // Motion-responsive smoothing: snap faster when moving (0.8 vs 0.3)
-                const lerpT = motionDetected ? 0.8 : 0.3;
+
+                // Motion-responsive smoothing:
+                //   - velocity-based: clamp(velocity * 80, 0.65, 0.98) when moving
+                //   - idle: 0.65 — smoother than before (was 0.3) but still fast
+                //   - motion sensor fallback: 0.9 when pixel-motion detected
+                const velocityLerp = Math.min(0.98, 0.65 + velocityMag * 80);
+                const lerpT = detected.length > 0
+                    ? (motionDetected ? Math.max(velocityLerp, 0.9) : 0.65)
+                    : 0;
                 for (let i = 0; i < detected.length; i++) {
                     smoothedBoxesRef.current[i] = lerpBox(smoothedBoxesRef.current[i], detected[i], lerpT);
                     applyBlurToRegion(ctx, smoothedBoxesRef.current[i], opts.mode, opts.strength, opts.padding, canvas.width);
