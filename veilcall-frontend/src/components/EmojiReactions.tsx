@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 
 export interface ReactionEvent {
     id: string;
@@ -23,16 +24,17 @@ interface Particle {
     dur: number;    // animation duration (ms)
 }
 
-// Global layer that holds all flying particles, portalled to <body>
-// so they can fly above everything (header, controls, etc.)
+
+// Global layer — portalled to document.body to escape any ancestor stacking context
+// (backdrop-filter / transform on Room containers would clip position:fixed otherwise)
 function ParticleLayer({ particles }: { particles: Particle[] }) {
     if (particles.length === 0) return null;
-    return (
+    return createPortal(
         <div
             aria-hidden="true"
             style={{
                 position: 'fixed', inset: 0, pointerEvents: 'none',
-                zIndex: 9999, overflow: 'hidden',
+                zIndex: 99999, overflow: 'visible',
             }}
         >
             {particles.map(p => (
@@ -45,9 +47,9 @@ function ParticleLayer({ particles }: { particles: Particle[] }) {
                         fontSize: p.size,
                         lineHeight: 1,
                         userSelect: 'none',
-                        // CSS custom props consumed by the keyframe
+                        // --drift: horizontal sway; --rise: full viewport height so emoji reaches y=0
                         ['--drift' as string]: `${p.dx}px`,
-                        ['--rise' as string]: `${p.y + 80}px`, // total distance to rise (ends above viewport)
+                        ['--rise' as string]: `${p.y + 60}px`,
                         animation: `emoji-fly-up ${p.dur}ms cubic-bezier(0.22,1,0.36,1) forwards`,
                         willChange: 'transform, opacity',
                     }}
@@ -55,16 +57,16 @@ function ParticleLayer({ particles }: { particles: Particle[] }) {
                     {p.emoji}
                 </div>
             ))}
-            {/* Keyframe injected once via a style tag — avoids a separate CSS file */}
             <style>{`
                 @keyframes emoji-fly-up {
-                    0%   { transform: translate(0, 0)            scale(1.4);  opacity: 1; }
-                    15%  { transform: translate(calc(var(--drift) * .3), -80px) scale(1.6); opacity: 1; }
-                    70%  { transform: translate(var(--drift), calc(var(--rise) * -0.7))     scale(1);   opacity: 0.85; }
-                    100% { transform: translate(calc(var(--drift) * 1.2), calc(var(--rise) * -1)) scale(0.6); opacity: 0; }
+                    0%   { transform: translate(0, 0) scale(1.5); opacity: 1; }
+                    20%  { opacity: 1; }
+                    80%  { transform: translate(var(--drift), calc(var(--rise) * -0.9)) scale(0.9); opacity: 0.7; }
+                    100% { transform: translate(calc(var(--drift) * 1.1), calc(var(--rise) * -1.05)) scale(0.5); opacity: 0; }
                 }
             `}</style>
-        </div>
+        </div>,
+        document.body
     );
 }
 
