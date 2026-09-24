@@ -18,12 +18,14 @@ export const DEFAULT_BLUR_OPTIONS: BlurOptions = {
 };
 
 /**
- * When a face bbox width is smaller than this fraction of the canvas,
- * the user is far from the camera — scale up padding so the blur region
- * still covers the full face (including hair/ears at distance).
+ * Distance-based face coverage thresholds.
+ * FAR:      face bbox < 25% of canvas width → boost padding significantly
+ * VERY_FAR: face bbox <  8% of canvas width → face model is unreliable at this
+ *           distance; switch to full-frame blur to guarantee coverage.
  */
-const FAR_FACE_THRESHOLD = 0.15; // face < 15% of canvas width → "far"
-const FAR_FACE_PADDING_SCALE = 1.8; // multiply padding by this when far
+const FAR_FACE_THRESHOLD = 0.25; // < 25% canvas width → "far"
+const VERY_FAR_FACE_THRESHOLD = 0.08; // <  8% canvas width → full-frame blur
+const FAR_FACE_PADDING_SCALE = 2.8;  // aggressive padding for far faces
 
 /** Resolution constraints per network tier */
 const TIER_CAMERA: Record<NetworkTier, { width: number; height: number }> = {
@@ -61,19 +63,30 @@ function applyBlurToRegion(
     mode: BlurMode,
     strength: number,
     padding: number,
-    canvasWidth: number
+    canvasWidth: number,
+    /** alpha override for safety-net ghost frames (0–1) */
+    alpha = 1
 ) {
     const { x, y, w, h } = box;
-    // Adaptive padding: boost when face is far (small in frame)
-    const isFarFace = canvasWidth > 0 && (w / canvasWidth) < FAR_FACE_THRESHOLD;
+    const faceRatio = canvasWidth > 0 ? w / canvasWidth : 1;
+
+    // VERY far face: bbox is too small to trust — full-frame blur is the only safe option
+    if (faceRatio < VERY_FAR_FACE_THRESHOLD) {
+        applyFullFrameBlur(ctx, strength);
+        return;
+    }
+
+    // Far face: scale padding aggressively to cover hair, ears, and body at distance
+    const isFarFace = faceRatio < FAR_FACE_THRESHOLD;
     const effectivePadding = isFarFace ? padding * FAR_FACE_PADDING_SCALE : padding;
 
     const px = Math.max(0, x - effectivePadding);
     const py = Math.max(0, y - effectivePadding);
-    const pw = w + effectivePadding * 2;
-    const ph = h + effectivePadding * 2;
+    const pw = Math.min(canvasWidth - px, w + effectivePadding * 2);
+    const ph = Math.min(ctx.canvas.height - py, h + effectivePadding * 2);
 
     ctx.save();
+    if (alpha < 1) ctx.globalAlpha = alpha;
     ctx.beginPath();
     ctx.ellipse(px + pw / 2, py + ph / 2, pw / 2, ph / 2, 0, 0, Math.PI * 2);
     ctx.clip();
@@ -243,8 +256,10 @@ export function useFaceBlur(
          * Used as a moving fallback when the ML detector hasn't loaded yet.
          */
         function getMotionCentroidBox(cw: number, ch: number): FaceBox {
+            // Default: cover 80% width × 90% height centred in frame
+            // — safe for any user distance when no motion data yet
             if (!prevFrameData) {
-                return { x: cw * 0.2, y: ch * 0.02, w: cw * 0.6, h: ch * 0.65 };
+                return { x: cw * 0.1, y: ch * 0.02, w: cw * 0.8, h: ch * 0.9 };
             }
             const curr = mCtx.getImageData(0, 0, 16, 9);
             let totalW = 0, cx = 0, cy = 0;
@@ -259,11 +274,13 @@ export function useFaceBlur(
                     totalW += w;
                 }
             }
-            if (totalW < 1) return { x: cw * 0.2, y: ch * 0.02, w: cw * 0.6, h: ch * 0.65 };
+            // No motion: default to full-frame coverage
+            if (totalW < 1) return { x: cw * 0.1, y: ch * 0.02, w: cw * 0.8, h: ch * 0.9 };
             const nx = (cx / totalW) / 15;
             const ny = (cy / totalW) / 8;
-            const bw = cw * 0.55;
-            const bh = ch * 0.65;
+            // Enlarged: 70%×80% to safely cover the full body silhouette at distance
+            const bw = cw * 0.70;
+            const bh = ch * 0.80;
             return {
                 x: Math.max(0, nx * cw - bw / 2),
                 y: Math.max(0, ny * ch - bh / 2),
@@ -272,8 +289,19 @@ export function useFaceBlur(
             };
         }
 
-        let noDetectionFrames = 0; // frames since last successful ML face detection
-        const NO_DETECTION_EXPIRE = 5; // dissolve stale box after ~160ms at 30fps
+        let noDetectionFrames = 0;
+        /**
+         * How long to keep the stale blur box alive when detect returns nothing.
+         * 12 frames (~400ms at 30fps) prevents skin exposure during fast head movement
+         * where the detector momentarily loses the face.
+         */
+        const NO_DETECTION_EXPIRE = 12;
+        /**
+         * After NO_DETECTION_EXPIRE, render a fading ghost overlay for this many
+         * additional frames so there is NEVER an abrupt jump from fully-blurred to
+         * fully-transparent. The face might re-enter during this window.
+         */
+        const GRACE_BLUR_FRAMES = 8;
 
         // Velocity tracking for adaptive lerp
         // When the detected box is moving fast we snap to it (lerpT→1)
@@ -338,15 +366,13 @@ export function useFaceBlur(
                 // Smooth and apply blur per detected face
                 const detected = lastDetectedRef.current;
 
-                // Stale-box expiry: count consecutive frames with no detections
+                // ── Stale-box lifecycle ───────────────────────────────────────
                 if (detected.length === 0) {
                     noDetectionFrames++;
                 } else {
                     noDetectionFrames = 0;
 
-                    // ── Velocity-based adaptive lerp ─────────────────────────────
-                    // Measure how much the first detected face moved since last frame.
-                    // If fast → snap instantly (lerpT→1); if slow → smooth (lerpT→0.65)
+                    // ── Velocity-based adaptive lerp ──────────────────────────
                     if (prevDetected && detected[0]) {
                         const dx = (detected[0].x - prevDetected.x) / (canvas.width || 640);
                         const dy = (detected[0].y - prevDetected.y) / (canvas.height || 480);
@@ -354,8 +380,12 @@ export function useFaceBlur(
                     }
                     if (detected[0]) prevDetected = { ...detected[0] };
                 }
-                // After enough frames with no detection, dissolve the blur region
-                if (noDetectionFrames > NO_DETECTION_EXPIRE) {
+
+                const staleExpired = noDetectionFrames > NO_DETECTION_EXPIRE;
+                const graceExpired = noDetectionFrames > NO_DETECTION_EXPIRE + GRACE_BLUR_FRAMES;
+
+                // Clear smoothed boxes ONLY after the full grace window expires
+                if (graceExpired) {
                     smoothedBoxesRef.current = [];
                 }
 
@@ -364,26 +394,35 @@ export function useFaceBlur(
                 }
                 smoothedBoxesRef.current = smoothedBoxesRef.current.slice(0, detected.length);
 
-                // Motion-responsive smoothing:
-                //   - velocity-based: clamp(velocity * 80, 0.65, 0.98) when moving
-                //   - idle: 0.65 — smoother than before (was 0.3) but still fast
-                //   - motion sensor fallback: 0.9 when pixel-motion detected
+                // Velocity-adaptive lerp: snap fast when moving, smooth when idle
                 const velocityLerp = Math.min(0.98, 0.65 + velocityMag * 80);
                 const lerpT = detected.length > 0
                     ? (motionDetected ? Math.max(velocityLerp, 0.9) : 0.65)
                     : 0;
-                for (let i = 0; i < detected.length; i++) {
-                    smoothedBoxesRef.current[i] = lerpBox(smoothedBoxesRef.current[i], detected[i], lerpT);
-                    applyBlurToRegion(ctx, smoothedBoxesRef.current[i], opts.mode, opts.strength, opts.padding, canvas.width);
-                }
 
-                // If face was recently detected, keep blurring the smoothed box (until expire)
-                if (detected.length === 0 && smoothedBoxesRef.current.length > 0) {
-                    smoothedBoxesRef.current.forEach(b => applyBlurToRegion(ctx, b, opts.mode, opts.strength, opts.padding, canvas.width));
+                if (detected.length > 0) {
+                    // Normal case: face detected this frame
+                    for (let i = 0; i < detected.length; i++) {
+                        smoothedBoxesRef.current[i] = lerpBox(smoothedBoxesRef.current[i], detected[i], lerpT);
+                        applyBlurToRegion(ctx, smoothedBoxesRef.current[i], opts.mode, opts.strength, opts.padding, canvas.width);
+                    }
+                } else if (!staleExpired && smoothedBoxesRef.current.length > 0) {
+                    // Stale window: no detection this frame but we're within the expire window.
+                    // Keep blurring the LAST known position at full opacity.
+                    smoothedBoxesRef.current.forEach(b =>
+                        applyBlurToRegion(ctx, b, opts.mode, opts.strength, opts.padding, canvas.width));
+                } else if (!graceExpired && smoothedBoxesRef.current.length > 0) {
+                    // Grace window: fade out the stale box gradually (0.85 → 0 alpha)
+                    // so there is NEVER an abrupt uncovered frame.
+                    const graceFraction = 1 - (noDetectionFrames - NO_DETECTION_EXPIRE) / GRACE_BLUR_FRAMES;
+                    const ghostAlpha = Math.max(0, graceFraction * 0.85);
+                    smoothedBoxesRef.current.forEach(b =>
+                        applyBlurToRegion(ctx, b, opts.mode, opts.strength, opts.padding, canvas.width, ghostAlpha));
                 }
             } else if (opts.enabled && (!useMlDetection || !detectorRef.current)) {
-                // Fallback: use motion centroid so the blur follows the user's movements
-                // instead of being stuck at a fixed center region.
+                // Fallback (low tier / detector not yet loaded):
+                // Motion centroid covers most of the frame — enlarged to guarantee coverage
+                // for users at 0.5-2m distance where face size is unpredictable.
                 const box = getMotionCentroidBox(canvas.width, canvas.height);
                 applyBlurToRegion(ctx, box, opts.mode, opts.strength, opts.padding, canvas.width);
             }

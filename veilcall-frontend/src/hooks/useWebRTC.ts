@@ -171,21 +171,36 @@ export function useWebRTC({ roomCode, localStream, networkTier = 'high', autoCon
         // ── Remote stream ─────────────────────────────────────────────────────
         const remoteStream = new MediaStream();
         pc.ontrack = (e) => {
-            // Bug 1 fix: always add e.track directly (Firefox/Safari deliver track
-            // without populating e.streams[], so e.streams[0] alone is not reliable)
+            // Always add e.track directly (Firefox/Safari may not populate e.streams[])
             if (e.track && !remoteStream.getTrackById(e.track.id)) {
                 remoteStream.addTrack(e.track);
-                // When the track ends, remove it so the tile updates correctly
                 e.track.onended = () => remoteStream.removeTrack(e.track);
             }
-            // Also sync tracks from the MediaStream if present (Chrome compat)
+            // Also sync any tracks from the stream payload (Chrome compat)
             e.streams[0]?.getTracks().forEach((t) => {
                 if (!remoteStream.getTrackById(t.id)) remoteStream.addTrack(t);
             });
+
+            // IMPORTANT: create a NEW MediaStream snapshot so React's useEffect in
+            // VideoTile detects the change (same object reference = no srcObject re-assign).
+            // This guarantees the <video> element is updated every time a track lands.
+            const streamSnapshot = new MediaStream(remoteStream.getTracks());
+
+            const hasVideo = streamSnapshot.getVideoTracks().length > 0;
+            const hasAudio = streamSnapshot.getAudioTracks().length > 0;
+
             setPeers((prev) => {
                 const next = new Map(prev);
                 const p = next.get(peerId);
-                if (p) next.set(peerId, { ...p, stream: remoteStream, connected: true });
+                if (p) {
+                    next.set(peerId, {
+                        ...p,
+                        stream: streamSnapshot,
+                        // Mark connected only when we have at least a video track
+                        // (prevents blank tile while waiting for the second track)
+                        connected: p.connected || hasVideo || (hasAudio && !hasVideo),
+                    });
+                }
                 return next;
             });
         };
@@ -532,6 +547,8 @@ export function useWebRTC({ roomCode, localStream, networkTier = 'high', autoCon
 
     // ── Auto-connect effects (must be after `connect` is declared) ────────────
     // Effect 1: reset the once-per-room guard whenever roomCode changes
+    // (including when it becomes '' after disconnect — batching means the new code
+    // may arrive in the same render, so we also reset in disconnect())
     useEffect(() => {
         if (!autoConnect) return;
         autoConnectFiredRef.current = false;
@@ -551,6 +568,9 @@ export function useWebRTC({ roomCode, localStream, networkTier = 'high', autoCon
         signaling.current = null;
         pcs.current.forEach((pc) => pc.close());
         pcs.current.clear();
+        iceCandidateQueue.current.clear();
+        negotiatingRef.current.clear();
+        autoConnectFiredRef.current = false; // ← allow connect() to fire for the next room
         setPeers(new Map());
         setConnected(false);
     }, []);

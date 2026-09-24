@@ -34,9 +34,20 @@ const matchQueue = [];
  */
 function generateRoomCode() {
     const CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-    return Array.from(crypto.randomBytes(8))
-        .map(b => CHARS[b % CHARS.length])
-        .join('');
+    const CHARS_LEN = CHARS.length;           // 36
+    // Rejection-sampling: discard bytes >= 252 to eliminate modulo bias.
+    // 252 = floor(256/36)*36 — any byte in [0,252) maps uniformly to one of 36 chars.
+    const LIMIT = Math.floor(256 / CHARS_LEN) * CHARS_LEN; // 252
+    const code = [];
+    while (code.length < 8) {
+        const batch = Array.from(crypto.randomBytes(16));
+        for (const b of batch) {
+            if (b >= LIMIT) continue; // reject biased tail
+            code.push(CHARS[b % CHARS_LEN]);
+            if (code.length === 8) break;
+        }
+    }
+    return code.join('');
 }
 
 /**

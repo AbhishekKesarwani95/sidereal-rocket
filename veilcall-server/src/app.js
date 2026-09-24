@@ -84,10 +84,16 @@ function createApp() {
     // ── Serve built frontend (production) ────────────────────────────────────
     if (DIST_EXISTS) {
         app.use(express.static(DIST_DIR, {
-            // Never cache index.html — always fetch fresh for SPA routing
             setHeaders(res, filePath) {
                 if (filePath.endsWith('index.html')) {
+                    // index.html must never be cached — SPA entry point
                     res.setHeader('Cache-Control', 'no-store');
+                } else if (filePath.includes('/assets/')) {
+                    // Vite hashes all asset filenames — safe to cache forever
+                    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+                } else {
+                    // Other static files (robots.txt, manifest, etc.) — revalidate daily
+                    res.setHeader('Cache-Control', 'public, max-age=86400');
                 }
             },
         }));
